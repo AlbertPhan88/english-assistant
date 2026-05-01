@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 auth_step1.py
 auth_step2.py
+data/idioms.db-journal
+data/idioms.db-wal
+data/idioms.db-shm
