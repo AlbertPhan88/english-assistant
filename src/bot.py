@@ -56,7 +56,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    n = 1
+    n = 5
     if context.args:
         try:
             n = max(1, min(int(context.args[0]), 20))
