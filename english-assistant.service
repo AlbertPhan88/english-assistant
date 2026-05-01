@@ -1,0 +1,14 @@
+[Unit]
+Description=English Idiom Assistant Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/english-assistant
+ExecStart=%h/projects/english-assistant/.venv/bin/python -m src.main run
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=%h/projects/english-assistant/.env
+
+[Install]
+WantedBy=default.target
