@@ -50,13 +50,33 @@ python -m src.main init
 
 > Skip this if you cloned with the existing `data/idioms.db` — the DB is already populated with 933 idioms.
 
-### 4. Run the bot
+### 4. Run as a systemd service (auto-starts on reboot)
+
+```bash
+cp english-assistant.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now english-assistant
+loginctl enable-linger $USER
+```
+
+The bot is now managed by systemd and will restart automatically on reboot or crash.
+
+**Useful commands:**
+
+```bash
+systemctl --user status english-assistant     # check status
+systemctl --user restart english-assistant    # restart after config change
+systemctl --user stop english-assistant       # stop
+journalctl --user -u english-assistant -f     # live logs
+```
+
+Send `/start` to your bot on Telegram to register, then `/quiz` to test.
+
+### Run manually (dev/testing only)
 
 ```bash
 python -m src.main run
 ```
-
-Send `/start` to your bot on Telegram to register, then `/quiz` to test.
 
 ---
 
