@@ -1,8 +1,8 @@
 .env
-*.db
+credentials.json
+data/token.pickle
 __pycache__/
 *.pyc
 .venv/
-pdfs/*.pdf
-data/*.db
-data/*.json
+auth_step1.py
+auth_step2.py

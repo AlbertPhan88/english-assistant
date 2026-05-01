@@ -5,13 +5,19 @@ from pathlib import Path
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS ingested_pdfs (
+    filename    TEXT PRIMARY KEY,
+    ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS idioms (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    phrase      TEXT NOT NULL UNIQUE,
-    meaning     TEXT NOT NULL,
-    example     TEXT,
-    source_pdf  TEXT,
-    created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    phrase           TEXT NOT NULL UNIQUE,
+    meaning          TEXT NOT NULL,
+    example          TEXT,
+    vietnamese_equiv TEXT,
+    source_pdf       TEXT,
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -63,8 +69,28 @@ def add_idiom(conn, phrase: str, meaning: str, example: str | None, source_pdf: 
     return idiom_id
 
 
+def is_pdf_ingested(conn, filename: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM ingested_pdfs WHERE filename = ?", (filename,)
+    ).fetchone() is not None
+
+
+def mark_pdf_ingested(conn, filename: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO ingested_pdfs(filename) VALUES (?)", (filename,))
+
+
 def update_example(conn, idiom_id: int, example: str) -> None:
     conn.execute("UPDATE idioms SET example = ? WHERE id = ?", (example, idiom_id))
+
+
+def update_vietnamese(conn, idiom_id: int, viet: str) -> None:
+    conn.execute("UPDATE idioms SET vietnamese_equiv = ? WHERE id = ?", (viet, idiom_id))
+
+
+def idioms_missing_vietnamese(conn) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, phrase, meaning FROM idioms WHERE vietnamese_equiv IS NULL OR vietnamese_equiv = ''"
+    ))
 
 
 def register_user(conn, chat_id: int, username: str | None) -> None:

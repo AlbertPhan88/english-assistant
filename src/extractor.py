@@ -88,7 +88,17 @@ def extract_idioms(text: str, client: Anthropic, model: str = "claude-sonnet-4-6
 
 
 def ingest_pdf(pdf_path: Path, db_path: str, client: Anthropic) -> tuple[int, int]:
-    text = read_pdf_text(pdf_path)
+    with db.connect(db_path) as conn:
+        if db.is_pdf_ingested(conn, pdf_path.name):
+            return 0, 0  # already done
+
+    try:
+        text = read_pdf_text(pdf_path)
+    except Exception as e:
+        print(f"  WARNING: could not read {pdf_path.name}: {e} — skipping.")
+        with db.connect(db_path) as conn:
+            db.mark_pdf_ingested(conn, pdf_path.name)  # don't retry bad files
+        return 0, 0
     idioms = extract_idioms(text, client)
     added = 0
     with db.connect(db_path) as conn:
@@ -98,4 +108,5 @@ def ingest_pdf(pdf_path: Path, db_path: str, client: Anthropic) -> tuple[int, in
             new_id = db.add_idiom(conn, it["phrase"], it["meaning"], it["example"], pdf_path.name)
             if new_id is not None:
                 added += 1
+        db.mark_pdf_ingested(conn, pdf_path.name)
     return added, len(idioms)

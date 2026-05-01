@@ -23,7 +23,7 @@ LETTERS = ["A", "B", "C", "D"]
 
 def _question_text(q: Question) -> str:
     opts = "\n".join(f"{LETTERS[i]}. {opt}" for i, opt in enumerate(q.options))
-    return f"Fill in the blank:\n\n_{q.stem}_\n\n{opts}"
+    return f"Fill in the blank:\n\n{q.stem}\n\n{opts}"
 
 
 def _keyboard(q: Question) -> InlineKeyboardMarkup:
@@ -40,7 +40,6 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
         chat_id=chat_id,
         text=_question_text(q),
         reply_markup=_keyboard(q),
-        parse_mode="Markdown",
     )
 
 
@@ -57,12 +56,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    n = 1
+    if context.args:
+        try:
+            n = max(1, min(int(context.args[0]), 20))
+        except ValueError:
+            pass
     with db.connect(config.DB_PATH) as conn:
-        questions = build_daily_set(conn, 1)
+        questions = build_daily_set(conn, n)
     if not questions:
         await update.message.reply_text("No idioms to review right now. Ingest more PDFs!")
         return
-    await _send_question(chat_id, questions[0], context)
+    for q in questions:
+        await _send_question(chat_id, q, context)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,17 +139,16 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     phrase = idiom["phrase"]
     meaning = idiom["meaning"]
     example = idiom["example"] or meaning
+    viet = idiom["vietnamese_equiv"] or ""
+    viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
 
     if chosen == correct_index:
-        reply = f"✅ *Correct!*\n\n*{phrase}* — {meaning}\n\n_{example}_"
+        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}\n\n{example}"
     else:
-        reply = (
-            f"❌ *Wrong.* The answer was *{phrase}*.\n\n"
-            f"Meaning: {meaning}\n\n_{example}_"
-        )
+        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}\n\n{example}"
 
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(reply, parse_mode="Markdown")
+    await query.message.reply_text(reply)
 
 
 async def send_daily_quiz(application: Application) -> None:
@@ -170,29 +175,33 @@ async def send_daily_quiz(application: Application) -> None:
 def run(db_path: str) -> None:
     logging.basicConfig(level=logging.INFO)
 
-    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("quiz", cmd_quiz))
-    application.add_handler(CommandHandler("stats", cmd_stats))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
-
     scheduler = AsyncIOScheduler(timezone=config.TZ)
-    scheduler.add_job(
-        send_daily_quiz,
-        "cron",
-        hour=config.DAILY_HOUR,
-        minute=0,
-        kwargs={"application": application},
-    )
 
     async def on_startup(app: Application) -> None:
+        scheduler.add_job(
+            send_daily_quiz,
+            "cron",
+            hour=config.DAILY_HOUR,
+            minute=0,
+            kwargs={"application": app},
+        )
         scheduler.start()
         logger.info("Scheduler started. Daily quiz at %d:00 %s", config.DAILY_HOUR, config.TZ)
 
     async def on_shutdown(app: Application) -> None:
         scheduler.shutdown(wait=False)
 
-    application.post_init = on_startup
-    application.post_shutdown = on_shutdown
+    application = (
+        Application.builder()
+        .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
+        .build()
+    )
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("quiz", cmd_quiz))
+    application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
+
     application.run_polling(drop_pending_updates=True)
