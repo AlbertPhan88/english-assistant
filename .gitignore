@@ -1,0 +1,8 @@
+.env
+*.db
+__pycache__/
+*.pyc
+.venv/
+pdfs/*.pdf
+data/*.db
+data/*.json
