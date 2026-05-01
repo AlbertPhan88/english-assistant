@@ -15,9 +15,6 @@ from .quiz import Question, build_daily_set, build_question
 
 logger = logging.getLogger(__name__)
 
-# In-memory map: (chat_id, idiom_id) -> correct_index
-_pending: dict[tuple[int, int], int] = {}
-
 LETTERS = ["A", "B", "C", "D"]
 
 
@@ -27,15 +24,18 @@ def _question_text(q: Question) -> str:
 
 
 def _keyboard(q: Question) -> InlineKeyboardMarkup:
+    # Encode correct_index in every button so answers survive bot restarts
     buttons = [
-        InlineKeyboardButton(LETTERS[i], callback_data=f"ans:{q.idiom_id}:{i}")
+        InlineKeyboardButton(
+            LETTERS[i],
+            callback_data=f"ans:{q.idiom_id}:{i}:{q.correct_index}"
+        )
         for i in range(len(q.options))
     ]
     return InlineKeyboardMarkup([buttons])
 
 
 async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAULT_TYPE) -> None:
-    _pending[(chat_id, q.idiom_id)] = q.correct_index
     await context.bot.send_message(
         chat_id=chat_id,
         text=_question_text(q),
@@ -118,18 +118,14 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
 
     parts = query.data.split(":")
-    if len(parts) != 3 or parts[0] != "ans":
+    if len(parts) != 4 or parts[0] != "ans":
+        # old-format button (pre-restart) — just remove it
+        await query.edit_message_reply_markup(reply_markup=None)
         return
 
     idiom_id = int(parts[1])
     chosen = int(parts[2])
-    chat_id = query.message.chat_id
-    key = (chat_id, idiom_id)
-
-    correct_index = _pending.pop(key, None)
-    if correct_index is None:
-        await query.edit_message_reply_markup(reply_markup=None)
-        return
+    correct_index = int(parts[3])
 
     with db.connect(config.DB_PATH) as conn:
         idiom = db.get_idiom(conn, idiom_id)
