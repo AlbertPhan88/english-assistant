@@ -30,6 +30,12 @@ Rules:
 
 Output only the story, nothing else."""
 
+TRANSLATE_PROMPT = """Translate the following English story to Vietnamese. Keep it natural and colloquial — translate meaning, not word-for-word. Where an English idiom has a Vietnamese equivalent, use it.
+
+{text}
+
+Output only the Vietnamese translation, nothing else."""
+
 
 def _parse_response(text: str) -> tuple[str, str]:
     lines = [l.strip().strip('"') for l in text.strip().splitlines() if l.strip()]
@@ -85,6 +91,15 @@ def fill_missing_stories(db_path: str, client: Anthropic) -> int:
         if i % 50 == 0:
             print(f"  {i}/{total} done ({filled} filled)...", flush=True)
     return filled
+
+
+def translate_to_vietnamese(text: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+    resp = client.messages.create(
+        model=model,
+        max_tokens=500,
+        messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text)}],
+    )
+    return resp.content[0].text.strip() if resp.content else ""
 
 
 def generate_daily_story(idioms: list[dict], client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:

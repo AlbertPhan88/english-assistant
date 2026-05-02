@@ -46,9 +46,10 @@ CREATE TABLE IF NOT EXISTS reask_queue (
 );
 
 CREATE TABLE IF NOT EXISTS daily_stories (
-    date    TEXT PRIMARY KEY,
-    story   TEXT NOT NULL,
-    phrases TEXT NOT NULL
+    date     TEXT PRIMARY KEY,
+    story    TEXT NOT NULL,
+    phrases  TEXT NOT NULL,
+    story_vi TEXT
 );
 """
 
@@ -71,6 +72,10 @@ def _migrate(conn) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
     if "story" not in cols:
         conn.execute("ALTER TABLE idioms ADD COLUMN story TEXT")
+
+    ds_cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_stories)")}
+    if "story_vi" not in ds_cols:
+        conn.execute("ALTER TABLE daily_stories ADD COLUMN story_vi TEXT")
 
 
 def init(db_path: str) -> None:
@@ -174,10 +179,10 @@ def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
     return rows
 
 
-def save_daily_story(conn, date_str: str, story: str, phrases: str) -> None:
+def save_daily_story(conn, date_str: str, story: str, phrases: str, story_vi: str = "") -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO daily_stories(date, story, phrases) VALUES (?, ?, ?)",
-        (date_str, story, phrases),
+        "INSERT OR REPLACE INTO daily_stories(date, story, phrases, story_vi) VALUES (?, ?, ?, ?)",
+        (date_str, story, phrases, story_vi),
     )
 
 

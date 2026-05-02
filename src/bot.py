@@ -130,23 +130,20 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         row = db.get_daily_story(conn, today)
 
     if row:
+        vi_section = f"\n\n🇻🇳 Bản dịch:\n{row['story_vi']}" if row["story_vi"] else ""
         await update.message.reply_text(
-            f"📖 Today's story\n\n{row['story']}\n\n({row['phrases']})"
+            f"📖 Today's story ({row['phrases']})\n\n{row['story']}{vi_section}"
         )
         return
 
     # Story not generated yet (before 6 AM or first run) — generate and cache it
     from anthropic import Anthropic
-    from .examples import generate_daily_story
+    from .examples import generate_daily_story, translate_to_vietnamese
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
     with db.connect(config.DB_PATH) as conn:
-        questions = build_daily_set(conn, config.DAILY_IDIOM_COUNT)
-        story_idioms = []
-        for q in questions:
-            idiom = db.get_idiom(conn, q.idiom_id)
-            if idiom:
-                story_idioms.append({"phrase": idiom["phrase"], "meaning": idiom["meaning"]})
+        rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
+        story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
 
     if not story_idioms:
         await update.message.reply_text("No idioms available yet.")
@@ -154,12 +151,15 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     story = generate_daily_story(story_idioms, client)
     phrases = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
-    if story:
-        with db.connect(config.DB_PATH) as conn:
-            db.save_daily_story(conn, today, story, phrases)
-        await update.message.reply_text(f"📖 Today's story\n\n{story}\n\n({phrases})")
-    else:
+    if not story:
         await update.message.reply_text("Couldn't generate a story right now, try again.")
+        return
+
+    story_vi = translate_to_vietnamese(story, client)
+    with db.connect(config.DB_PATH) as conn:
+        db.save_daily_story(conn, today, story, phrases, story_vi)
+    vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
+    await update.message.reply_text(f"📖 Today's story ({phrases})\n\n{story}{vi_section}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -212,7 +212,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def send_daily_quiz(application: Application) -> None:
     from anthropic import Anthropic
-    from .examples import generate_daily_story
+    from .examples import generate_daily_story, translate_to_vietnamese
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
     today = date.today()
@@ -220,7 +220,6 @@ async def send_daily_quiz(application: Application) -> None:
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
         iotd = db.weakest_idiom(conn)
-        # Fetch due idiom rows directly — story is built from these, then questions too
         rows = db.due_idioms(conn, today, config.DAILY_IDIOM_COUNT)
 
     if not rows:
@@ -230,13 +229,15 @@ async def send_daily_quiz(application: Application) -> None:
     story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
     phrases_str = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
 
-    # Step 1: generate story
+    # Step 1: generate English story + Vietnamese translation
     daily_story = ""
+    story_vi = ""
     try:
         daily_story = generate_daily_story(story_idioms, client)
         if daily_story:
+            story_vi = translate_to_vietnamese(daily_story, client)
             with db.connect(config.DB_PATH) as conn:
-                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str)
+                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str, story_vi)
     except Exception as e:
         logger.error("Failed to generate daily story: %s", e)
 
@@ -275,9 +276,10 @@ async def send_daily_quiz(application: Application) -> None:
 
             # Daily story — read this, then the quiz will test you on it
             if daily_story:
+                vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📖 Today's story ({phrases_str})\n\n{daily_story}",
+                    text=f"📖 Today's story ({phrases_str})\n\n{daily_story}{vi_section}",
                 )
 
             await application.bot.send_message(
