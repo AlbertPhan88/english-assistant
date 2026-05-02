@@ -131,7 +131,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if row and row["story_vi"]:
         await update.message.reply_text(
-            f"📖 Today's story ({row['phrases']})\n\n{row['story']}\n\n🇻🇳 Bản dịch:\n{row['story_vi']}"
+            f"📖 Today's story\n\n{row['phrases']}\n\n{row['story']}\n\n🇻🇳 Bản dịch:\n{row['story_vi']}"
         )
         return
 
@@ -148,12 +148,18 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         with db.connect(config.DB_PATH) as conn:
             rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
-            story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
+            story_idioms = [
+                {"phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+                for r in rows
+            ]
         if not story_idioms:
             await update.message.reply_text("No idioms available yet.")
             return
         story = generate_daily_story(story_idioms, client)
-        phrases = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
+        phrases = "\n".join(
+            f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+            for i in story_idioms
+        )
         if not story:
             await update.message.reply_text("Couldn't generate a story right now, try again.")
             return
@@ -162,7 +168,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db.connect(config.DB_PATH) as conn:
         db.save_daily_story(conn, today, story, phrases, story_vi)
     vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
-    await update.message.reply_text(f"📖 Today's story ({phrases})\n\n{story}{vi_section}")
+    await update.message.reply_text(f"📖 Today's story\n\n{phrases}\n\n{story}{vi_section}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,8 +235,14 @@ async def send_daily_quiz(application: Application) -> None:
         logger.warning("Daily quiz: no questions available.")
         return
 
-    story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
-    phrases_str = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
+    story_idioms = [
+        {"phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+        for r in rows
+    ]
+    phrases_str = "\n".join(
+        f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+        for i in story_idioms
+    )
 
     # Step 1: generate English story + Vietnamese translation
     daily_story = ""
@@ -282,7 +294,7 @@ async def send_daily_quiz(application: Application) -> None:
                 vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📖 Today's story ({phrases_str})\n\n{daily_story}{vi_section}",
+                    text=f"📖 Today's story\n\n{phrases_str}\n\n{daily_story}{vi_section}",
                 )
 
             await application.bot.send_message(
