@@ -144,11 +144,12 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
     if row:
-        # Story exists but no Vietnamese — just translate it
+        # Story exists but no Vietnamese — load idioms for translation context
         story = row["story"]
         idiom_ids_str = row["idiom_ids"] or ""
         with db.connect(config.DB_PATH) as conn:
             phrases = db.build_phrases_str(conn, idiom_ids_str) if idiom_ids_str else row["phrases"]
+            story_idioms = db.get_idioms_by_ids(conn, idiom_ids_str) if idiom_ids_str else []
     else:
         with db.connect(config.DB_PATH) as conn:
             rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
@@ -169,7 +170,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Couldn't generate a story right now, try again.")
             return
 
-    story_vi = translate_to_vietnamese(story, client)
+    story_vi = translate_to_vietnamese(story, client, idioms=story_idioms)
     with db.connect(config.DB_PATH) as conn:
         db.save_daily_story(conn, today, story, phrases, story_vi, idiom_ids_str)
     vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
@@ -256,7 +257,7 @@ async def send_daily_quiz(application: Application) -> None:
     try:
         daily_story = generate_daily_story(story_idioms, client)
         if daily_story:
-            story_vi = translate_to_vietnamese(daily_story, client)
+            story_vi = translate_to_vietnamese(daily_story, client, idioms=story_idioms)
             with db.connect(config.DB_PATH) as conn:
                 db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str, story_vi, idiom_ids_str)
     except Exception as e:

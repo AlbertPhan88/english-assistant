@@ -42,8 +42,19 @@ Rules:
 
 Output only the story, nothing else."""
 
-TRANSLATE_PROMPT = """Translate the following English story to Vietnamese. Keep it natural and colloquial — translate meaning, not word-for-word. Where an English idiom has a Vietnamese equivalent, use it.
+TRANSLATE_PROMPT = """Translate the following English story to Vietnamese.
 
+Idiom reference (use these Vietnamese equivalents where the idiom appears):
+{idiom_map}
+
+Rules:
+- Write in natural, colloquial Vietnamese — like a Vietnamese author telling a funny story
+- Where an English idiom appears, replace it with its Vietnamese equivalent from the reference above
+- Translate meaning and feeling, not word-for-word
+- Keep the humor and absurdity of the original
+- Do not add notes or explanations
+
+Story:
 {text}
 
 Output only the Vietnamese translation, nothing else."""
@@ -105,11 +116,23 @@ def fill_missing_stories(db_path: str, client: Anthropic) -> int:
     return filled
 
 
-def translate_to_vietnamese(text: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def translate_to_vietnamese(
+    text: str,
+    client: Anthropic,
+    idioms: list[dict] | None = None,
+    model: str = "claude-sonnet-4-6",
+) -> str:
+    if idioms:
+        idiom_map = "\n".join(
+            f'- "{i["phrase"]}" → {i["viet"]}'
+            for i in idioms if i.get("viet") and i["viet"] != "—"
+        ) or "(none available)"
+    else:
+        idiom_map = "(none available)"
     resp = client.messages.create(
         model=model,
-        max_tokens=500,
-        messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text)}],
+        max_tokens=800,
+        messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text, idiom_map=idiom_map)}],
     )
     return resp.content[0].text.strip() if resp.content else ""
 

@@ -195,6 +195,20 @@ def get_daily_story(conn, date_str: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
+def get_idioms_by_ids(conn, idiom_ids_str: str) -> list[dict]:
+    """Return idiom dicts (phrase, meaning, viet) for the given comma-separated IDs."""
+    if not idiom_ids_str:
+        return []
+    ids = [int(i) for i in idiom_ids_str.split(",") if i.strip()]
+    placeholders = ",".join("?" * len(ids))
+    rows = list(conn.execute(
+        f"SELECT id, phrase, meaning, vietnamese_equiv FROM idioms WHERE id IN ({placeholders})", ids
+    ))
+    order = {i: pos for pos, i in enumerate(ids)}
+    rows.sort(key=lambda r: order.get(r["id"], 0))
+    return [{"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""} for r in rows]
+
+
 def build_phrases_str(conn, idiom_ids_str: str) -> str:
     """Rebuild the idiom bullet list from current DB data (picks up latest Vietnamese)."""
     if not idiom_ids_str:
