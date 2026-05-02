@@ -46,10 +46,11 @@ CREATE TABLE IF NOT EXISTS reask_queue (
 );
 
 CREATE TABLE IF NOT EXISTS daily_stories (
-    date     TEXT PRIMARY KEY,
-    story    TEXT NOT NULL,
-    phrases  TEXT NOT NULL,
-    story_vi TEXT
+    date      TEXT PRIMARY KEY,
+    story     TEXT NOT NULL,
+    phrases   TEXT NOT NULL,
+    story_vi  TEXT,
+    idiom_ids TEXT
 );
 """
 
@@ -76,6 +77,8 @@ def _migrate(conn) -> None:
     ds_cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_stories)")}
     if "story_vi" not in ds_cols:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN story_vi TEXT")
+    if "idiom_ids" not in ds_cols:
+        conn.execute("ALTER TABLE daily_stories ADD COLUMN idiom_ids TEXT")
 
 
 def init(db_path: str) -> None:
@@ -179,17 +182,34 @@ def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
     return rows
 
 
-def save_daily_story(conn, date_str: str, story: str, phrases: str, story_vi: str = "") -> None:
+def save_daily_story(conn, date_str: str, story: str, phrases: str, story_vi: str = "", idiom_ids: str = "") -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO daily_stories(date, story, phrases, story_vi) VALUES (?, ?, ?, ?)",
-        (date_str, story, phrases, story_vi),
+        "INSERT OR REPLACE INTO daily_stories(date, story, phrases, story_vi, idiom_ids) VALUES (?, ?, ?, ?, ?)",
+        (date_str, story, phrases, story_vi, idiom_ids),
     )
 
 
 def get_daily_story(conn, date_str: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT story, phrases, story_vi FROM daily_stories WHERE date = ?", (date_str,)
+        "SELECT story, phrases, story_vi, idiom_ids FROM daily_stories WHERE date = ?", (date_str,)
     ).fetchone()
+
+
+def build_phrases_str(conn, idiom_ids_str: str) -> str:
+    """Rebuild the idiom bullet list from current DB data (picks up latest Vietnamese)."""
+    if not idiom_ids_str:
+        return ""
+    ids = [int(i) for i in idiom_ids_str.split(",") if i.strip()]
+    placeholders = ",".join("?" * len(ids))
+    rows = list(conn.execute(
+        f"SELECT id, phrase, vietnamese_equiv FROM idioms WHERE id IN ({placeholders})", ids
+    ))
+    order = {i: pos for pos, i in enumerate(ids)}
+    rows.sort(key=lambda r: order.get(r["id"], 0))
+    return "\n".join(
+        f'• "{r["phrase"]}"' + (f' — {r["vietnamese_equiv"]}' if r["vietnamese_equiv"] and r["vietnamese_equiv"] != "—" else "")
+        for r in rows
+    )
 
 
 def weakest_idiom(conn) -> sqlite3.Row | None:

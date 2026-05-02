@@ -130,8 +130,10 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         row = db.get_daily_story(conn, today)
 
     if row and row["story_vi"]:
+        with db.connect(config.DB_PATH) as conn:
+            phrases_display = db.build_phrases_str(conn, row["idiom_ids"]) if row["idiom_ids"] else row["phrases"]
         await update.message.reply_text(
-            f"📖 Today's story\n\n{row['phrases']}\n\n{row['story']}\n\n🇻🇳 Bản dịch:\n{row['story_vi']}"
+            f"📖 Today's story\n\n{phrases_display}\n\n{row['story']}\n\n🇻🇳 Bản dịch:\n{row['story_vi']}"
         )
         return
 
@@ -144,17 +146,20 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if row:
         # Story exists but no Vietnamese — just translate it
         story = row["story"]
-        phrases = row["phrases"]
+        idiom_ids_str = row["idiom_ids"] or ""
+        with db.connect(config.DB_PATH) as conn:
+            phrases = db.build_phrases_str(conn, idiom_ids_str) if idiom_ids_str else row["phrases"]
     else:
         with db.connect(config.DB_PATH) as conn:
             rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
             story_idioms = [
-                {"phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
                 for r in rows
             ]
         if not story_idioms:
             await update.message.reply_text("No idioms available yet.")
             return
+        idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
         story = generate_daily_story(story_idioms, client)
         phrases = "\n".join(
             f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
@@ -166,7 +171,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     story_vi = translate_to_vietnamese(story, client)
     with db.connect(config.DB_PATH) as conn:
-        db.save_daily_story(conn, today, story, phrases, story_vi)
+        db.save_daily_story(conn, today, story, phrases, story_vi, idiom_ids_str)
     vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
     await update.message.reply_text(f"📖 Today's story\n\n{phrases}\n\n{story}{vi_section}")
 
@@ -236,9 +241,10 @@ async def send_daily_quiz(application: Application) -> None:
         return
 
     story_idioms = [
-        {"phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
         for r in rows
     ]
+    idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
     phrases_str = "\n".join(
         f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
         for i in story_idioms
@@ -252,7 +258,7 @@ async def send_daily_quiz(application: Application) -> None:
         if daily_story:
             story_vi = translate_to_vietnamese(daily_story, client)
             with db.connect(config.DB_PATH) as conn:
-                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str, story_vi)
+                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str, story_vi, idiom_ids_str)
     except Exception as e:
         logger.error("Failed to generate daily story: %s", e)
 
