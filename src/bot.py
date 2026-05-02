@@ -129,31 +129,34 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db.connect(config.DB_PATH) as conn:
         row = db.get_daily_story(conn, today)
 
-    if row:
-        vi_section = f"\n\n🇻🇳 Bản dịch:\n{row['story_vi']}" if row["story_vi"] else ""
+    if row and row["story_vi"]:
         await update.message.reply_text(
-            f"📖 Today's story ({row['phrases']})\n\n{row['story']}{vi_section}"
+            f"📖 Today's story ({row['phrases']})\n\n{row['story']}\n\n🇻🇳 Bản dịch:\n{row['story_vi']}"
         )
         return
 
-    # Story not generated yet (before 6 AM or first run) — generate and cache it
+    # No story yet, or story exists but missing Vietnamese translation — generate now
     from anthropic import Anthropic
     from .examples import generate_daily_story, translate_to_vietnamese
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    with db.connect(config.DB_PATH) as conn:
-        rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
-        story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
 
-    if not story_idioms:
-        await update.message.reply_text("No idioms available yet.")
-        return
-
-    story = generate_daily_story(story_idioms, client)
-    phrases = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
-    if not story:
-        await update.message.reply_text("Couldn't generate a story right now, try again.")
-        return
+    if row:
+        # Story exists but no Vietnamese — just translate it
+        story = row["story"]
+        phrases = row["phrases"]
+    else:
+        with db.connect(config.DB_PATH) as conn:
+            rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
+            story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
+        if not story_idioms:
+            await update.message.reply_text("No idioms available yet.")
+            return
+        story = generate_daily_story(story_idioms, client)
+        phrases = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
+        if not story:
+            await update.message.reply_text("Couldn't generate a story right now, try again.")
+            return
 
     story_vi = translate_to_vietnamese(story, client)
     with db.connect(config.DB_PATH) as conn:
