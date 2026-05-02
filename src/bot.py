@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from . import config, db
-from .quiz import Question, build_daily_set, build_question, build_reverse_question
+from .quiz import Question, build_daily_set, build_question, build_question_from_story, build_reverse_question
 
 logger = logging.getLogger(__name__)
 
@@ -215,60 +215,74 @@ async def send_daily_quiz(application: Application) -> None:
     from .examples import generate_daily_story
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    today = date.today()
 
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
-        questions = build_daily_set(conn, config.DAILY_IDIOM_COUNT)
         iotd = db.weakest_idiom(conn)
-        # Fetch full idiom rows for the daily story
-        story_idioms = []
-        for q in questions:
-            idiom = db.get_idiom(conn, q.idiom_id)
-            if idiom:
-                story_idioms.append({"phrase": idiom["phrase"], "meaning": idiom["meaning"]})
+        # Fetch due idiom rows directly — story is built from these, then questions too
+        rows = db.due_idioms(conn, today, config.DAILY_IDIOM_COUNT)
 
-    if not questions:
+    if not rows:
         logger.warning("Daily quiz: no questions available.")
         return
 
-    # Generate one story that weaves all today's idioms together
-    daily_story = ""
+    story_idioms = [{"phrase": r["phrase"], "meaning": r["meaning"]} for r in rows]
     phrases_str = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
-    if story_idioms:
-        try:
-            daily_story = generate_daily_story(story_idioms, client)
-            if daily_story:
-                with db.connect(config.DB_PATH) as conn:
-                    db.save_daily_story(conn, date.today().isoformat(), daily_story, phrases_str)
-        except Exception as e:
-            logger.error("Failed to generate daily story: %s", e)
+
+    # Step 1: generate story
+    daily_story = ""
+    try:
+        daily_story = generate_daily_story(story_idioms, client)
+        if daily_story:
+            with db.connect(config.DB_PATH) as conn:
+                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str)
+    except Exception as e:
+        logger.error("Failed to generate daily story: %s", e)
+
+    # Step 2: build questions using sentences FROM the story as stems
+    with db.connect(config.DB_PATH) as conn:
+        questions = []
+        for i, row in enumerate(rows):
+            try:
+                if i % 3 == 2 and (row["story"] or row["example"]):
+                    questions.append(build_reverse_question(conn, row))
+                elif daily_story:
+                    questions.append(build_question_from_story(conn, row, daily_story))
+                else:
+                    questions.append(build_question(conn, row))
+            except ValueError:
+                continue
+
+    if not questions:
+        logger.warning("Daily quiz: failed to build questions.")
+        return
 
     for chat_id in users:
         try:
             # Idiom of the Day — weakest idiom as a reading item
             if iotd:
-                phrase = iotd["phrase"]
-                meaning = iotd["meaning"]
+                iotd_phrase = iotd["phrase"]
+                iotd_meaning = iotd["meaning"]
                 iotd_story = iotd["story"] or iotd["example"] or ""
                 viet = iotd["vietnamese_equiv"] or ""
                 viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
                 story_line = f"\n\n{iotd_story}" if iotd_story else ""
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🌟 Idiom of the Day\n\n{phrase}\n{meaning}{viet_line}{story_line}",
+                    text=f"🌟 Idiom of the Day\n\n{iotd_phrase}\n{iotd_meaning}{viet_line}{story_line}",
                 )
 
-            # Daily story using all today's idioms
+            # Daily story — read this, then the quiz will test you on it
             if daily_story:
-                idiom_names = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📖 Today's story — spot the idioms! ({idiom_names})\n\n{daily_story}",
+                    text=f"📖 Today's story ({phrases_str})\n\n{daily_story}",
                 )
 
             await application.bot.send_message(
                 chat_id=chat_id,
-                text=f"Good morning! Here are your {len(questions)} idioms for today 🌅",
+                text=f"Good morning! Now let's test your recall 🌅 ({len(questions)} questions)",
             )
             for q in questions:
                 await _send_question(chat_id, q, type("ctx", (), {"bot": application.bot})())

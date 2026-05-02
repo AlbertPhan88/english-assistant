@@ -75,6 +75,42 @@ def build_reverse_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
+def _find_sentence(story: str, phrase: str) -> str | None:
+    """Return the sentence from story that contains phrase, or None."""
+    sentences = re.split(r'(?<=[.!?])\s+', story.strip())
+    pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+    for sent in sentences:
+        if pattern.search(sent):
+            return sent.strip()
+    return None
+
+
+def build_question_from_story(conn, idiom_row: sqlite3.Row, story: str) -> Question:
+    """Like build_question but uses the sentence from the daily story as the stem."""
+    phrase = idiom_row["phrase"]
+    sentence = _find_sentence(story, phrase)
+    if not sentence:
+        return build_question(conn, idiom_row)
+
+    stem = _blank(sentence, phrase)
+    distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
+    if len(distractors) < 3:
+        raise ValueError("Not enough idioms for distractors.")
+
+    options = [d["phrase"] for d in distractors] + [phrase]
+    random.shuffle(options)
+    correct_index = options.index(phrase)
+
+    return Question(
+        idiom_id=idiom_row["id"],
+        stem=stem,
+        options=options,
+        correct_index=correct_index,
+        kind="forward",
+        phrase=phrase,
+    )
+
+
 def build_daily_set(conn, n: int) -> list[Question]:
     today = date.today()
     rows = db.due_idioms(conn, today, n)
