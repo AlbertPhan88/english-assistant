@@ -29,25 +29,30 @@ def generate_funny_example(phrase: str, meaning: str, client: Anthropic, model: 
 
 
 def fill_missing_examples(db_path: str, client: Anthropic) -> int:
-    filled = 0
     with db.connect(db_path) as conn:
         rows = db.idioms_missing_example(conn)
-        for row in rows:
-            example, viet = generate_funny_example(row["phrase"], row["meaning"], client)
-            if example:
+    filled = 0
+    for row in rows:
+        example, viet = generate_funny_example(row["phrase"], row["meaning"], client)
+        if example:
+            with db.connect(db_path) as conn:
                 db.update_example(conn, row["id"], example)
                 db.update_vietnamese(conn, row["id"], viet)
-                filled += 1
+            filled += 1
     return filled
 
 
 def fill_missing_vietnamese(db_path: str, client: Anthropic) -> int:
-    filled = 0
     with db.connect(db_path) as conn:
         rows = db.idioms_missing_vietnamese(conn)
-        for row in rows:
-            _, viet = generate_funny_example(row["phrase"], row["meaning"], client)
-            if viet:
+    filled = 0
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        _, viet = generate_funny_example(row["phrase"], row["meaning"], client)
+        if viet:
+            with db.connect(db_path) as conn:
                 db.update_vietnamese(conn, row["id"], viet)
-                filled += 1
+            filled += 1
+        if i % 50 == 0:
+            print(f"  {i}/{total} done ({filled} filled)...", flush=True)
     return filled
