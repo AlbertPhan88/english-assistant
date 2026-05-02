@@ -14,8 +14,9 @@ STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phra
 
 Rules:
 - The idiom must appear verbatim in the story
+- Use the idiom naturally — never surround it with words that mean the same thing (e.g. don't write "he bribed someone to grease their palms" — that's redundant)
 - Each sentence builds tension or absurdity
-- Under 60 words total, no dialogue tags, no explanation of the idiom
+- Under 60 words total, no explanation of the idiom's meaning
 
 Output only the story, nothing else."""
 
@@ -25,6 +26,7 @@ DAILY_STORY_PROMPT = """Write a short funny story (6-10 sentences, under 180 wor
 
 Rules:
 - Every idiom must appear in the story at least once, exactly as written
+- Use each idiom naturally — never surround it with words that mean the same thing (e.g. don't write "he bribed someone to grease their palms" — that's redundant; just write "he greased their palms")
 - The story should be absurd and entertaining, flowing naturally from one idiom to the next
 - One continuous narrative — no separate paragraphs or sections
 
