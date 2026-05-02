@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS idioms (
     phrase           TEXT NOT NULL UNIQUE,
     meaning          TEXT NOT NULL,
     example          TEXT,
+    story            TEXT,
     vietnamese_equiv TEXT,
     source_pdf       TEXT,
     created_at       TEXT DEFAULT CURRENT_TIMESTAMP
@@ -36,6 +37,13 @@ CREATE TABLE IF NOT EXISTS users (
     username    TEXT,
     registered  TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS reask_queue (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    idiom_id   INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE,
+    added_at   TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -53,9 +61,16 @@ def connect(db_path: str):
         conn.close()
 
 
+def _migrate(conn) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
+    if "story" not in cols:
+        conn.execute("ALTER TABLE idioms ADD COLUMN story TEXT")
+
+
 def init(db_path: str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def add_idiom(conn, phrase: str, meaning: str, example: str | None, source_pdf: str | None) -> int | None:
@@ -111,11 +126,54 @@ def idioms_missing_example(conn) -> list[sqlite3.Row]:
     ))
 
 
+def update_story(conn, idiom_id: int, story: str) -> None:
+    conn.execute("UPDATE idioms SET story = ? WHERE id = ?", (story, idiom_id))
+
+
+def idioms_missing_story(conn) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, phrase, meaning FROM idioms WHERE story IS NULL OR story = ''"
+    ))
+
+
 def random_distractor_idioms(conn, exclude_id: int, n: int) -> list[sqlite3.Row]:
     return list(conn.execute(
         "SELECT id, phrase FROM idioms WHERE id != ? ORDER BY RANDOM() LIMIT ?",
         (exclude_id, n),
     ))
+
+
+def random_distractor_meanings(conn, exclude_id: int, n: int) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, meaning FROM idioms WHERE id != ? ORDER BY RANDOM() LIMIT ?",
+        (exclude_id, n),
+    ))
+
+
+def add_reask(conn, chat_id: int, idiom_id: int) -> None:
+    conn.execute(
+        "INSERT INTO reask_queue(chat_id, idiom_id) VALUES (?, ?)",
+        (chat_id, idiom_id),
+    )
+
+
+def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
+    rows = list(conn.execute(
+        "SELECT id, idiom_id FROM reask_queue WHERE chat_id = ? ORDER BY added_at ASC LIMIT ?",
+        (chat_id, n),
+    ))
+    if rows:
+        ids = [r["id"] for r in rows]
+        conn.execute(f"DELETE FROM reask_queue WHERE id IN ({','.join('?'*len(ids))})", ids)
+    return rows
+
+
+def weakest_idiom(conn) -> sqlite3.Row | None:
+    return conn.execute(
+        """SELECT i.* FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.repetitions > 0
+           ORDER BY r.ease ASC, r.wrong DESC LIMIT 1"""
+    ).fetchone()
 
 
 def get_idiom(conn, idiom_id: int) -> sqlite3.Row:

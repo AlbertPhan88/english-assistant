@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from . import config, db
-from .quiz import Question, build_daily_set, build_question
+from .quiz import Question, build_daily_set, build_question, build_reverse_question
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,10 @@ LETTERS = ["A", "B", "C", "D"]
 
 def _question_text(q: Question) -> str:
     opts = "\n".join(f"{LETTERS[i]}. {opt}" for i, opt in enumerate(q.options))
-    return f"Fill in the blank:\n\n{q.stem}\n\n{opts}"
+    prefix = "↩️ Try again — you missed this one before.\n\n" if q.reask else ""
+    if q.kind == "reverse":
+        return f"{prefix}What does '{q.phrase}' mean?\n\n{q.stem}\n\n{opts}"
+    return f"{prefix}Fill in the blank:\n\n{q.stem}\n\n{opts}"
 
 
 def _keyboard(q: Question) -> InlineKeyboardMarkup:
@@ -48,9 +51,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db.connect(config.DB_PATH) as conn:
         db.register_user(conn, user.id, user.username)
     await update.message.reply_text(
-        f"Hi {user.first_name}! 👋\n\n"
-        "I'll send you 5 idiom quizzes every day at 6 AM.\n"
-        "Type /quiz anytime for an extra one, /stats to see your progress."
+        f"Hi {user.first_name}!\n\n"
+        "I'll send you 10 idiom quizzes every day at 6 AM.\n"
+        "Type /quiz anytime for an extra set, /stats to see your progress."
     )
 
 
@@ -62,8 +65,25 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             n = max(1, min(int(context.args[0]), 20))
         except ValueError:
             pass
+
     with db.connect(config.DB_PATH) as conn:
-        questions = build_daily_set(conn, n)
+        # Prepend any pending re-asks
+        reask_rows = db.pop_reasks(conn, chat_id, n)
+        reask_questions = []
+        for r in reask_rows:
+            idiom = db.get_idiom(conn, r["idiom_id"])
+            if idiom:
+                try:
+                    q = build_question(conn, idiom)
+                    q.reask = True
+                    reask_questions.append(q)
+                except ValueError:
+                    pass
+
+        remaining = n - len(reask_questions)
+        new_questions = build_daily_set(conn, remaining) if remaining > 0 else []
+
+    questions = reask_questions + new_questions
     if not questions:
         await update.message.reply_text("No idioms to review right now. Ingest more PDFs!")
         return
@@ -107,7 +127,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start — register\n"
-        "/quiz  — get a question now\n"
+        "/quiz  — get 5 questions now\n"
+        "/quiz N — get N questions (max 20)\n"
         "/stats — see your progress\n"
         "/help  — this message"
     )
@@ -119,7 +140,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     parts = query.data.split(":")
     if len(parts) != 4 or parts[0] != "ans":
-        # old-format button (pre-restart) — just remove it
         await query.edit_message_reply_markup(reply_markup=None)
         return
 
@@ -127,21 +147,25 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chosen = int(parts[2])
     correct_index = int(parts[3])
 
+    chat_id = query.message.chat_id
     with db.connect(config.DB_PATH) as conn:
         idiom = db.get_idiom(conn, idiom_id)
         quality = 5 if chosen == correct_index else 2
         db.apply_review(conn, idiom_id, quality)
+        if chosen != correct_index:
+            db.add_reask(conn, chat_id, idiom_id)
 
     phrase = idiom["phrase"]
     meaning = idiom["meaning"]
-    example = idiom["example"] or meaning
+    # Show story if available, fall back to example, then meaning
+    story = idiom["story"] or idiom["example"] or meaning
     viet = idiom["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
 
     if chosen == correct_index:
-        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}\n\n{example}"
+        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}\n\n{story}"
     else:
-        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}\n\n{example}"
+        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}\n\n{story}"
 
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(reply)
@@ -151,6 +175,7 @@ async def send_daily_quiz(application: Application) -> None:
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
         questions = build_daily_set(conn, config.DAILY_IDIOM_COUNT)
+        iotd = db.weakest_idiom(conn)
 
     if not questions:
         logger.warning("Daily quiz: no questions available.")
@@ -158,6 +183,19 @@ async def send_daily_quiz(application: Application) -> None:
 
     for chat_id in users:
         try:
+            # Feature 5: Idiom of the Day — the weakest idiom as a reading item
+            if iotd:
+                phrase = iotd["phrase"]
+                meaning = iotd["meaning"]
+                story = iotd["story"] or iotd["example"] or ""
+                viet = iotd["vietnamese_equiv"] or ""
+                viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
+                story_line = f"\n\n{story}" if story else ""
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🌟 Idiom of the Day\n\n{phrase}\n{meaning}{viet_line}{story_line}",
+                )
+
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=f"Good morning! Here are your {len(questions)} idioms for today 🌅",
