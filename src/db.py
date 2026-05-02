@@ -188,7 +188,7 @@ def save_daily_story(conn, date_str: str, story: str, phrases: str, story_vi: st
 
 def get_daily_story(conn, date_str: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT story, phrases FROM daily_stories WHERE date = ?", (date_str,)
+        "SELECT story, phrases, story_vi FROM daily_stories WHERE date = ?", (date_str,)
     ).fetchone()
 
 
