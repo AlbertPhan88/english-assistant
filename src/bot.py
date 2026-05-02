@@ -172,28 +172,55 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def send_daily_quiz(application: Application) -> None:
+    from anthropic import Anthropic
+    from .examples import generate_daily_story
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
         questions = build_daily_set(conn, config.DAILY_IDIOM_COUNT)
         iotd = db.weakest_idiom(conn)
+        # Fetch full idiom rows for the daily story
+        story_idioms = []
+        for q in questions:
+            idiom = db.get_idiom(conn, q.idiom_id)
+            if idiom:
+                story_idioms.append({"phrase": idiom["phrase"], "meaning": idiom["meaning"]})
 
     if not questions:
         logger.warning("Daily quiz: no questions available.")
         return
 
+    # Generate one story that weaves all today's idioms together
+    daily_story = ""
+    if story_idioms:
+        try:
+            daily_story = generate_daily_story(story_idioms, client)
+        except Exception as e:
+            logger.error("Failed to generate daily story: %s", e)
+
     for chat_id in users:
         try:
-            # Feature 5: Idiom of the Day — the weakest idiom as a reading item
+            # Idiom of the Day — weakest idiom as a reading item
             if iotd:
                 phrase = iotd["phrase"]
                 meaning = iotd["meaning"]
-                story = iotd["story"] or iotd["example"] or ""
+                iotd_story = iotd["story"] or iotd["example"] or ""
                 viet = iotd["vietnamese_equiv"] or ""
                 viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
-                story_line = f"\n\n{story}" if story else ""
+                story_line = f"\n\n{iotd_story}" if iotd_story else ""
                 await application.bot.send_message(
                     chat_id=chat_id,
                     text=f"🌟 Idiom of the Day\n\n{phrase}\n{meaning}{viet_line}{story_line}",
+                )
+
+            # Daily story using all today's idioms
+            if daily_story:
+                idiom_names = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📖 Today's story — spot the idioms! ({idiom_names})\n\n{daily_story}",
                 )
 
             await application.bot.send_message(
