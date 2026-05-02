@@ -6,9 +6,19 @@ from . import db
 FUNNY_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), return exactly 2 lines:
 
 LINE 1: One funny sentence (max 15 words, absurd/unexpected). The idiom must appear verbatim.
-LINE 2: Vietnamese equivalent idiom or proverb (just the phrase, e.g. "Nước đổ lá khoai"). Write "—" if none exists.
+LINE 2: A Vietnamese idiom, proverb (tục ngữ), or folk saying (ca dao) with a similar meaning. Try hard — check idioms, proverbs, and common expressions. If no idiom exists, write a short Vietnamese phrase that captures the meaning (e.g. "nói vòng vo không đi vào vấn đề"). Never write "—".
 
 No labels, no explanation. Just 2 lines."""
+
+VIET_EQUIV_PROMPT = """English idiom: "{phrase}"
+Meaning: {meaning}
+
+Output ONE Vietnamese equivalent on a single line — in order of preference:
+1. A Vietnamese idiom or proverb (tục ngữ/thành ngữ) with the same meaning
+2. A Vietnamese folk saying (ca dao) that captures the idea
+3. A short Vietnamese phrase used in everyday speech
+
+One line only. No numbering, no explanation, no alternatives."""
 
 STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phrase}" (meaning: {meaning}).
 
@@ -114,13 +124,25 @@ def generate_daily_story(idioms: list[dict], client: Anthropic, model: str = "cl
     return resp.content[0].text.strip() if resp.content else ""
 
 
+def generate_vietnamese_equiv(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+    resp = client.messages.create(
+        model=model,
+        max_tokens=100,
+        messages=[{"role": "user", "content": VIET_EQUIV_PROMPT.format(phrase=phrase, meaning=meaning)}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+    # Take first non-empty line only
+    result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
+    return result if result and result != "—" else ""
+
+
 def fill_missing_vietnamese(db_path: str, client: Anthropic) -> int:
     with db.connect(db_path) as conn:
         rows = db.idioms_missing_vietnamese(conn)
     filled = 0
     total = len(rows)
     for i, row in enumerate(rows, 1):
-        _, viet = generate_funny_example(row["phrase"], row["meaning"], client)
+        viet = generate_vietnamese_equiv(row["phrase"], row["meaning"], client)
         if viet:
             with db.connect(db_path) as conn:
                 db.update_vietnamese(conn, row["id"], viet)

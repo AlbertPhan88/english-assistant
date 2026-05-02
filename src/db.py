@@ -119,7 +119,7 @@ def update_vietnamese(conn, idiom_id: int, viet: str) -> None:
 
 def idioms_missing_vietnamese(conn) -> list[sqlite3.Row]:
     return list(conn.execute(
-        "SELECT id, phrase, meaning FROM idioms WHERE vietnamese_equiv IS NULL OR vietnamese_equiv = ''"
+        "SELECT id, phrase, meaning FROM idioms WHERE vietnamese_equiv IS NULL OR vietnamese_equiv = '' OR vietnamese_equiv = '—'"
     ))
 
 
