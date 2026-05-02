@@ -61,6 +61,15 @@ Story:
 Output only the Vietnamese translation, nothing else."""
 
 
+REVIEW_VIET_PROMPT = """English idiom: "{phrase}" (meaning: {meaning})
+Current Vietnamese: "{viet}"
+
+Task: if "{viet}" is already a real Vietnamese idiom, proverb (tục ngữ/thành ngữ), or folk saying → output it unchanged.
+If it is a naive literal translation or plain description → output a better Vietnamese idiom or proverb.
+
+Output: one short Vietnamese phrase only. No explanation. No sentence. No dash."""
+
+
 def _parse_response(text: str) -> tuple[str, str]:
     lines = [l.strip().strip('"') for l in text.strip().splitlines() if l.strip()]
     example = lines[0] if len(lines) > 0 else ""
@@ -158,6 +167,39 @@ def generate_vietnamese_equiv(phrase: str, meaning: str, client: Anthropic, mode
     # Take first non-empty line only
     result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
     return result if result and result != "—" else ""
+
+
+def review_vietnamese_equiv(phrase: str, meaning: str, viet: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+    resp = client.messages.create(
+        model=model,
+        max_tokens=80,
+        messages=[{"role": "user", "content": REVIEW_VIET_PROMPT.format(phrase=phrase, meaning=meaning, viet=viet)}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+    result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
+    # Reject explanations: too long, contains explanation words, or is empty/dash
+    if not result or result == "—" or len(result) > 80 or any(w in result for w in ("là ", "được ", "nhưng ", "tuy ")):
+        return viet
+    return result
+
+
+def review_all_vietnamese(db_path: str, client: Anthropic) -> int:
+    with db.connect(db_path) as conn:
+        rows = list(conn.execute(
+            "SELECT id, phrase, meaning, vietnamese_equiv FROM idioms "
+            "WHERE vietnamese_equiv IS NOT NULL AND vietnamese_equiv != '' AND vietnamese_equiv != '—'"
+        ))
+    updated = 0
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        improved = review_vietnamese_equiv(row["phrase"], row["meaning"], row["vietnamese_equiv"], client)
+        if improved and improved != row["vietnamese_equiv"]:
+            with db.connect(db_path) as conn:
+                db.update_vietnamese(conn, row["id"], improved)
+            updated += 1
+        if i % 50 == 0:
+            print(f"  {i}/{total} reviewed ({updated} improved)...", flush=True)
+    return updated
 
 
 def fill_missing_vietnamese(db_path: str, client: Anthropic) -> int:

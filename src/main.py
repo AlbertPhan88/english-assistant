@@ -48,6 +48,16 @@ def cmd_fill_vietnamese(args) -> None:
     print(f"Generated Vietnamese equivalents for {filled} idiom(s).")
 
 
+def cmd_review_vietnamese(args) -> None:
+    from anthropic import Anthropic
+    from . import config
+    from .examples import review_all_vietnamese
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    updated = review_all_vietnamese(config.DB_PATH, client)
+    print(f"Reviewed all Vietnamese equivalents — {updated} improved.")
+
+
 def cmd_fill_stories(args) -> None:
     from anthropic import Anthropic
     from . import config
@@ -97,6 +107,7 @@ def main() -> None:
 
     sub.add_parser("fill-examples", help="Generate funny examples for idioms missing one")
     sub.add_parser("fill-vietnamese", help="Generate Vietnamese equivalents for all idioms")
+    sub.add_parser("review-vietnamese", help="Review and improve naive Vietnamese equivalents")
     sub.add_parser("fill-stories", help="Generate 3-sentence stories for all idioms")
     sub.add_parser("stats", help="Print DB stats")
     sub.add_parser("run", help="Start the Telegram bot")
@@ -110,6 +121,7 @@ def main() -> None:
         "ingest": cmd_ingest,
         "fill-examples": cmd_fill_examples,
         "fill-vietnamese": cmd_fill_vietnamese,
+        "review-vietnamese": cmd_review_vietnamese,
         "fill-stories": cmd_fill_stories,
         "stats": cmd_stats,
         "run": cmd_run,
