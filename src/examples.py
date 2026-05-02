@@ -44,12 +44,13 @@ Output only the story, nothing else."""
 
 TRANSLATE_PROMPT = """Translate the following English story to Vietnamese.
 
-Idiom reference (use these Vietnamese equivalents where the idiom appears):
+Idiom reference:
 {idiom_map}
 
 Rules:
 - Write in natural, colloquial Vietnamese — like a Vietnamese author telling a funny story
-- Where an English idiom appears, replace it with its Vietnamese equivalent from the reference above
+- When an English idiom is used as a VERB PHRASE (e.g. "he beat around the bush"), replace it with its Vietnamese equivalent from the reference above
+- When an English idiom is used as a NOUN or ADJECTIVE to describe someone/something (e.g. "Dave, the squeaky wheel"), translate its meaning naturally into Vietnamese (e.g. "Dave, tên hay kêu ca") — do NOT force a proverb into a noun slot
 - Translate meaning and feeling, not word-for-word
 - Keep the humor and absurdity of the original
 - Do not add notes or explanations
