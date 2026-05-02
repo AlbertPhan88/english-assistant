@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -124,13 +124,52 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    today = date.today().isoformat()
+    with db.connect(config.DB_PATH) as conn:
+        row = db.get_daily_story(conn, today)
+
+    if row:
+        await update.message.reply_text(
+            f"📖 Today's story\n\n{row['story']}\n\n({row['phrases']})"
+        )
+        return
+
+    # Story not generated yet (before 6 AM or first run) — generate and cache it
+    from anthropic import Anthropic
+    from .examples import generate_daily_story
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    with db.connect(config.DB_PATH) as conn:
+        questions = build_daily_set(conn, config.DAILY_IDIOM_COUNT)
+        story_idioms = []
+        for q in questions:
+            idiom = db.get_idiom(conn, q.idiom_id)
+            if idiom:
+                story_idioms.append({"phrase": idiom["phrase"], "meaning": idiom["meaning"]})
+
+    if not story_idioms:
+        await update.message.reply_text("No idioms available yet.")
+        return
+
+    story = generate_daily_story(story_idioms, client)
+    phrases = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
+    if story:
+        with db.connect(config.DB_PATH) as conn:
+            db.save_daily_story(conn, today, story, phrases)
+        await update.message.reply_text(f"📖 Today's story\n\n{story}\n\n({phrases})")
+    else:
+        await update.message.reply_text("Couldn't generate a story right now, try again.")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "/start — register\n"
-        "/quiz  — get 5 questions now\n"
+        "/start  — register\n"
+        "/quiz   — get 5 questions now\n"
         "/quiz N — get N questions (max 20)\n"
-        "/stats — see your progress\n"
-        "/help  — this message"
+        "/story  — today's idiom story\n"
+        "/stats  — see your progress\n"
+        "/help   — this message"
     )
 
 
@@ -194,9 +233,13 @@ async def send_daily_quiz(application: Application) -> None:
 
     # Generate one story that weaves all today's idioms together
     daily_story = ""
+    phrases_str = ", ".join(f'"{i["phrase"]}"' for i in story_idioms)
     if story_idioms:
         try:
             daily_story = generate_daily_story(story_idioms, client)
+            if daily_story:
+                with db.connect(config.DB_PATH) as conn:
+                    db.save_daily_story(conn, date.today().isoformat(), daily_story, phrases_str)
         except Exception as e:
             logger.error("Failed to generate daily story: %s", e)
 
@@ -261,6 +304,7 @@ def run(db_path: str) -> None:
     )
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("quiz", cmd_quiz))
+    application.add_handler(CommandHandler("story", cmd_story))
     application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))

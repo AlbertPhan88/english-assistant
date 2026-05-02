@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS reask_queue (
     idiom_id   INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE,
     added_at   TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS daily_stories (
+    date    TEXT PRIMARY KEY,
+    story   TEXT NOT NULL,
+    phrases TEXT NOT NULL
+);
 """
 
 
@@ -166,6 +172,19 @@ def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
         ids = [r["id"] for r in rows]
         conn.execute(f"DELETE FROM reask_queue WHERE id IN ({','.join('?'*len(ids))})", ids)
     return rows
+
+
+def save_daily_story(conn, date_str: str, story: str, phrases: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO daily_stories(date, story, phrases) VALUES (?, ?, ?)",
+        (date_str, story, phrases),
+    )
+
+
+def get_daily_story(conn, date_str: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT story, phrases FROM daily_stories WHERE date = ?", (date_str,)
+    ).fetchone()
 
 
 def weakest_idiom(conn) -> sqlite3.Row | None:
