@@ -1,6 +1,26 @@
 from anthropic import Anthropic
 
 from . import db
+from .db import THEME_ORDER
+
+
+THEME_LIST = THEME_ORDER
+
+TAG_THEMES_PROMPT = """You are tagging English idioms with a single theme.
+
+Theme list (choose exactly one per idiom):
+{theme_list}
+
+For each idiom below, output one line in the format:
+id|theme
+
+Idioms:
+{idiom_lines}
+
+Rules:
+- Output ONLY the id|theme lines, one per idiom, nothing else.
+- Use only themes from the list above.
+- If unsure, use "general"."""
 
 
 FUNNY_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), return exactly 2 lines:
@@ -216,3 +236,53 @@ def fill_missing_vietnamese(db_path: str, client: Anthropic) -> int:
         if i % 50 == 0:
             print(f"  {i}/{total} done ({filled} filled)...", flush=True)
     return filled
+
+
+def tag_themes_batch(batch: list, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> dict[int, str]:
+    """Tag up to 20 idioms with a theme in one API call. Returns {id: theme}."""
+    theme_list_str = ", ".join(THEME_LIST)
+    idiom_lines = "\n".join(f"{row['id']}. {row['phrase']} — {row['meaning']}" for row in batch)
+    prompt = TAG_THEMES_PROMPT.format(theme_list=theme_list_str, idiom_lines=idiom_lines)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+    results = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        parts = line.split("|", 1)
+        if len(parts) != 2:
+            continue
+        id_str, theme = parts[0].strip(), parts[1].strip().lower()
+        if not id_str.isdigit():
+            continue
+        if theme not in THEME_LIST:
+            continue
+        results[int(id_str)] = theme
+    return results
+
+
+def tag_all_themes(db_path: str, client: Anthropic) -> int:
+    """Batch-tag all idioms missing a theme. Returns number tagged."""
+    with db.connect(db_path) as conn:
+        rows = db.idioms_missing_theme(conn)
+    tagged = 0
+    total = len(rows)
+    batch_size = 20
+    for i in range(0, total, batch_size):
+        batch = rows[i:i + batch_size]
+        try:
+            results = tag_themes_batch(batch, client)
+        except Exception as e:
+            print(f"  Batch {i//batch_size + 1} failed: {e}", flush=True)
+            continue
+        with db.connect(db_path) as conn:
+            for idiom_id, theme in results.items():
+                db.update_theme(conn, idiom_id, theme)
+                tagged += 1
+        print(f"  {min(i + batch_size, total)}/{total} tagged ({tagged} so far)...", flush=True)
+    return tagged

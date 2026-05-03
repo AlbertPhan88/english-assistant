@@ -111,13 +111,13 @@ def build_question_from_story(conn, idiom_row: sqlite3.Row, story: str) -> Quest
     )
 
 
-def build_daily_set(conn, n: int) -> list[Question]:
-    today = date.today()
-    rows = db.due_idioms(conn, today, n)
+def build_questions_from_rows(conn, rows: list) -> list[Question]:
+    """Build questions from a pre-fetched list of idiom rows.
+    Every 3rd question is a reverse quiz (only if story or example available).
+    """
     questions = []
     for i, row in enumerate(rows):
         try:
-            # Every 3rd question is a reverse quiz (only if story or example exists)
             if i % 3 == 2 and (row["story"] or row["example"]):
                 questions.append(build_reverse_question(conn, row))
             else:
@@ -125,3 +125,9 @@ def build_daily_set(conn, n: int) -> list[Question]:
         except ValueError:
             continue
     return questions
+
+
+def build_daily_set(conn, n: int) -> list[Question]:
+    today = date.today()
+    rows = db.build_daily_rows(conn, today, n)
+    return build_questions_from_rows(conn, rows)

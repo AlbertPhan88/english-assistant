@@ -68,6 +68,16 @@ def cmd_fill_stories(args) -> None:
     print(f"Generated stories for {filled} idiom(s).")
 
 
+def cmd_tag_themes(args) -> None:
+    from anthropic import Anthropic
+    from . import config
+    from .examples import tag_all_themes
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    tagged = tag_all_themes(config.DB_PATH, client)
+    print(f"Tagged {tagged} idiom(s) with themes.")
+
+
 def cmd_stats(args) -> None:
     from . import config, db
 
@@ -109,6 +119,7 @@ def main() -> None:
     sub.add_parser("fill-vietnamese", help="Generate Vietnamese equivalents for all idioms")
     sub.add_parser("review-vietnamese", help="Review and improve naive Vietnamese equivalents")
     sub.add_parser("fill-stories", help="Generate 3-sentence stories for all idioms")
+    sub.add_parser("tag-themes", help="Bulk-tag all idioms with a theme using AI")
     sub.add_parser("stats", help="Print DB stats")
     sub.add_parser("run", help="Start the Telegram bot")
 
@@ -123,6 +134,7 @@ def main() -> None:
         "fill-vietnamese": cmd_fill_vietnamese,
         "review-vietnamese": cmd_review_vietnamese,
         "fill-stories": cmd_fill_stories,
+        "tag-themes": cmd_tag_themes,
         "stats": cmd_stats,
         "run": cmd_run,
         "sync-drive": cmd_sync_drive,

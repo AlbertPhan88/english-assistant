@@ -4,6 +4,11 @@ from datetime import date, datetime
 from pathlib import Path
 
 
+THEME_ORDER = [
+    "communication", "relationships", "emotions", "work", "success", "money", "time",
+    "conflict", "deception", "knowledge", "body", "animals", "food", "nature", "luck", "general",
+]
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ingested_pdfs (
     filename    TEXT PRIMARY KEY,
@@ -18,7 +23,8 @@ CREATE TABLE IF NOT EXISTS idioms (
     story            TEXT,
     vietnamese_equiv TEXT,
     source_pdf       TEXT,
-    created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    theme            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -52,6 +58,11 @@ CREATE TABLE IF NOT EXISTS daily_stories (
     story_vi  TEXT,
     idiom_ids TEXT
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -73,12 +84,19 @@ def _migrate(conn) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
     if "story" not in cols:
         conn.execute("ALTER TABLE idioms ADD COLUMN story TEXT")
+    if "theme" not in cols:
+        conn.execute("ALTER TABLE idioms ADD COLUMN theme TEXT")
 
     ds_cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_stories)")}
     if "story_vi" not in ds_cols:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN story_vi TEXT")
     if "idiom_ids" not in ds_cols:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN idiom_ids TEXT")
+
+    # Create app_settings table if it doesn't exist yet
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
 
 
 def init(db_path: str) -> None:
@@ -281,3 +299,199 @@ def apply_review(conn, idiom_id: int, quality: int) -> None:
            correct=correct+?, wrong=wrong+? WHERE idiom_id=?""",
         (ease, interval, reps, due, now, correct_delta, wrong_delta, idiom_id),
     )
+
+
+# --- Theme tagging ---
+
+def idioms_missing_theme(conn) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, phrase, meaning FROM idioms WHERE theme IS NULL OR theme = ''"
+    ))
+
+
+def update_theme(conn, idiom_id: int, theme: str) -> None:
+    conn.execute("UPDATE idioms SET theme = ? WHERE id = ?", (theme, idiom_id))
+
+
+# --- App settings ---
+
+def get_setting(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings(key, value) VALUES (?, ?)", (key, value)
+    )
+
+
+# --- Clustered daily set helpers ---
+
+def warm_up_idioms(conn, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
+    """Idioms with wrong > 0 AND last_seen >= 7 days ago, ordered by last_seen DESC."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    if exclude_ids:
+        placeholders = ",".join("?" * len(exclude_ids))
+        return list(conn.execute(
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                WHERE r.wrong > 0 AND r.last_seen <= ?
+                AND i.id NOT IN ({placeholders})
+                ORDER BY r.last_seen DESC
+                LIMIT ?""",
+            (cutoff, *exclude_ids, n),
+        ))
+    return list(conn.execute(
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.wrong > 0 AND r.last_seen <= ?
+           ORDER BY r.last_seen DESC
+           LIMIT ?""",
+        (cutoff, n),
+    ))
+
+
+def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
+    """New (repetitions=0) idioms with the given theme, ordered by id ASC."""
+    if exclude_ids:
+        placeholders = ",".join("?" * len(exclude_ids))
+        return list(conn.execute(
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                WHERE r.repetitions = 0 AND i.theme = ?
+                AND i.id NOT IN ({placeholders})
+                ORDER BY i.id ASC
+                LIMIT ?""",
+            (theme, *exclude_ids, n),
+        ))
+    return list(conn.execute(
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.repetitions = 0 AND i.theme = ?
+           ORDER BY i.id ASC
+           LIMIT ?""",
+        (theme, n),
+    ))
+
+
+def advance_theme_if_exhausted(conn) -> None:
+    """If current theme has 0 unseen idioms, walk THEME_ORDER to find next with unseen."""
+    current = get_setting(conn, "current_theme", THEME_ORDER[0])
+    unseen_count = conn.execute(
+        "SELECT COUNT(*) FROM idioms i JOIN reviews r ON i.id = r.idiom_id "
+        "WHERE r.repetitions = 0 AND i.theme = ?",
+        (current,),
+    ).fetchone()[0]
+    if unseen_count > 0:
+        return
+    # Find next theme with unseen idioms
+    try:
+        start_idx = THEME_ORDER.index(current)
+    except ValueError:
+        start_idx = 0
+    for offset in range(1, len(THEME_ORDER) + 1):
+        candidate = THEME_ORDER[(start_idx + offset) % len(THEME_ORDER)]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM idioms i JOIN reviews r ON i.id = r.idiom_id "
+            "WHERE r.repetitions = 0 AND i.theme = ?",
+            (candidate,),
+        ).fetchone()[0]
+        if count > 0:
+            set_setting(conn, "current_theme", candidate)
+            return
+    # All themes exhausted — leave setting as-is
+
+
+def build_daily_rows(conn, today: date, total: int = 10) -> list[sqlite3.Row]:
+    """Build a clustered daily set: warm-up + SM-2 review + new from theme."""
+    today_str = today.isoformat()
+
+    # Check if there are enough wrong answers for warm-up
+    total_wrong = conn.execute("SELECT SUM(wrong) FROM reviews").fetchone()[0] or 0
+
+    # Bucket 1: warm-up (3 slots) — skip if total wrong < 3
+    warmup_target = 3
+    warmup: list[sqlite3.Row] = []
+    if total_wrong >= 3:
+        warmup = warm_up_idioms(conn, warmup_target, [])
+
+    warmup_ids = [r["id"] for r in warmup]
+
+    # Bucket 2: SM-2 review (3 slots)
+    review_target = 3
+    if warmup_ids:
+        placeholders = ",".join("?" * len(warmup_ids))
+        review = list(conn.execute(
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                WHERE r.repetitions > 0 AND r.due_date <= ?
+                AND i.id NOT IN ({placeholders})
+                ORDER BY r.due_date ASC, r.ease ASC
+                LIMIT ?""",
+            (today_str, *warmup_ids, review_target),
+        ))
+    else:
+        review = list(conn.execute(
+            """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+               FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+               WHERE r.repetitions > 0 AND r.due_date <= ?
+               ORDER BY r.due_date ASC, r.ease ASC
+               LIMIT ?""",
+            (today_str, review_target),
+        ))
+
+    review_ids = [r["id"] for r in review]
+    exclude_ids = warmup_ids + review_ids
+
+    # Bucket 3: new from current theme (4 slots)
+    new_target = 4
+    advance_theme_if_exhausted(conn)
+    current_theme = get_setting(conn, "current_theme", THEME_ORDER[0])
+    new_rows = new_idioms_from_theme(conn, current_theme, new_target, exclude_ids)
+
+    all_rows = warmup + review + new_rows
+    obtained = len(all_rows)
+
+    # If any bucket came up short, expand others to fill total
+    if obtained < total:
+        shortfall = total - obtained
+        all_ids = [r["id"] for r in all_rows]
+        if all_ids:
+            placeholders = ",".join("?" * len(all_ids))
+            extra = list(conn.execute(
+                f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                    FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                    WHERE i.id NOT IN ({placeholders})
+                    ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
+                    LIMIT ?""",
+                (*all_ids, shortfall),
+            ))
+        else:
+            extra = list(conn.execute(
+                """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                   FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                   ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
+                   LIMIT ?""",
+                (shortfall,),
+            ))
+        all_rows.extend(extra)
+
+    return all_rows[:total]
+
+
+# --- Weekly review ---
+
+def weak_idioms_this_week(conn, n: int) -> list[sqlite3.Row]:
+    """Idioms with last_seen >= 7 days ago, ordered by wrong/(correct+wrong+1) DESC."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    return list(conn.execute(
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.last_seen >= ?
+           ORDER BY CAST(r.wrong AS REAL) / (r.correct + r.wrong + 1) DESC
+           LIMIT ?""",
+        (cutoff, n),
+    ))

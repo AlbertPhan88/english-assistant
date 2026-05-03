@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from . import config, db
-from .quiz import Question, build_daily_set, build_question, build_question_from_story, build_reverse_question
+from .quiz import Question, build_daily_set, build_question, build_question_from_story, build_questions_from_rows, build_reverse_question
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,11 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     pass
 
         remaining = n - len(reask_questions)
-        new_questions = build_daily_set(conn, remaining) if remaining > 0 else []
+        if remaining > 0:
+            rows = db.build_daily_rows(conn, date.today(), remaining)
+            new_questions = build_questions_from_rows(conn, rows)
+        else:
+            new_questions = []
 
     questions = reask_questions + new_questions
     if not questions:
@@ -235,7 +239,7 @@ async def send_daily_quiz(application: Application) -> None:
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
         iotd = db.weakest_idiom(conn)
-        rows = db.due_idioms(conn, today, config.DAILY_IDIOM_COUNT)
+        rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT)
 
     if not rows:
         logger.warning("Daily quiz: no questions available.")
@@ -265,15 +269,7 @@ async def send_daily_quiz(application: Application) -> None:
 
     # Step 2: build quiz questions using stored per-idiom examples (not story sentences)
     with db.connect(config.DB_PATH) as conn:
-        questions = []
-        for i, row in enumerate(rows):
-            try:
-                if i % 3 == 2 and (row["story"] or row["example"]):
-                    questions.append(build_reverse_question(conn, row))
-                else:
-                    questions.append(build_question(conn, row))
-            except ValueError:
-                continue
+        questions = build_questions_from_rows(conn, rows)
 
     if not questions:
         logger.warning("Daily quiz: failed to build questions.")
@@ -312,6 +308,68 @@ async def send_daily_quiz(application: Application) -> None:
             logger.error("Failed to send daily quiz to %s: %s", chat_id, e)
 
 
+async def send_weekly_review(application: Application) -> None:
+    from anthropic import Anthropic
+    from .examples import generate_daily_story, translate_to_vietnamese
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    with db.connect(config.DB_PATH) as conn:
+        users = db.all_users(conn)
+        rows = db.weak_idioms_this_week(conn, 10)
+
+    if not rows:
+        return
+
+    story_idioms = [
+        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+        for r in rows
+    ]
+
+    # Build bullet list with accuracy
+    bullet_lines = []
+    for r in rows:
+        total_ans = (r["correct"] or 0) + (r["wrong"] or 0)
+        pct = round((r["correct"] or 0) / total_ans * 100) if total_ans else 0
+        bullet_lines.append(f"• {r['phrase']} ({pct}% correct)")
+    bullets = "\n".join(bullet_lines)
+
+    # Generate story + Vietnamese translation
+    daily_story = ""
+    story_vi = ""
+    phrases_str = "\n".join(
+        f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+        for i in story_idioms
+    )
+    try:
+        daily_story = generate_daily_story(story_idioms, client)
+        if daily_story:
+            story_vi = translate_to_vietnamese(daily_story, client, idioms=story_idioms)
+    except Exception as e:
+        logger.error("Failed to generate weekly review story: %s", e)
+
+    # Build questions
+    with db.connect(config.DB_PATH) as conn:
+        questions = build_questions_from_rows(conn, rows)
+
+    for chat_id in users:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=f"📅 Weekly Review — your toughest idioms this week:\n\n{bullets}",
+            )
+            if daily_story:
+                vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📖 Weekly story\n\n{phrases_str}\n\n{daily_story}{vi_section}",
+                )
+            for q in questions:
+                await _send_question(chat_id, q, type("ctx", (), {"bot": application.bot})())
+        except Exception as e:
+            logger.error("Failed to send weekly review to %s: %s", chat_id, e)
+
+
 def run(db_path: str) -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -322,6 +380,14 @@ def run(db_path: str) -> None:
             send_daily_quiz,
             "cron",
             hour=config.DAILY_HOUR,
+            minute=0,
+            kwargs={"application": app},
+        )
+        scheduler.add_job(
+            send_weekly_review,
+            "cron",
+            day_of_week="sat",
+            hour=8,
             minute=0,
             kwargs={"application": app},
         )
