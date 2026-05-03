@@ -75,10 +75,13 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if idiom:
                 try:
                     q = build_question(conn, idiom)
-                    q.reask = True
-                    reask_questions.append(q)
                 except ValueError:
-                    pass
+                    try:
+                        q = build_reverse_question(conn, idiom)
+                    except ValueError:
+                        continue
+                q.reask = True
+                reask_questions.append(q)
 
         remaining = n - len(reask_questions)
         if remaining > 0:

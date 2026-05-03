@@ -33,6 +33,13 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
         raise ValueError(f"Idiom {phrase!r} has no example or meaning.")
 
     stem = _blank(example, phrase)
+    # If blanking left no context (example was just the phrase), try story
+    if stem.strip() == "___":
+        story = idiom_row["story"] if idiom_row["story"] else ""
+        if story:
+            stem = _blank(story, phrase)
+        if not story or stem.strip() == "___":
+            raise ValueError(f"Idiom {phrase!r} has no usable fill-in context.")
 
     distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
     if len(distractors) < 3:
@@ -123,7 +130,10 @@ def build_questions_from_rows(conn, rows: list) -> list[Question]:
             else:
                 questions.append(build_question(conn, row))
         except ValueError:
-            continue
+            try:
+                questions.append(build_reverse_question(conn, row))
+            except ValueError:
+                continue
     return questions
 
 
