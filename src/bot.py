@@ -263,15 +263,13 @@ async def send_daily_quiz(application: Application) -> None:
     except Exception as e:
         logger.error("Failed to generate daily story: %s", e)
 
-    # Step 2: build questions using sentences FROM the story as stems
+    # Step 2: build quiz questions using stored per-idiom examples (not story sentences)
     with db.connect(config.DB_PATH) as conn:
         questions = []
         for i, row in enumerate(rows):
             try:
                 if i % 3 == 2 and (row["story"] or row["example"]):
                     questions.append(build_reverse_question(conn, row))
-                elif daily_story:
-                    questions.append(build_question_from_story(conn, row, daily_story))
                 else:
                     questions.append(build_question(conn, row))
             except ValueError:
