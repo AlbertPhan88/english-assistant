@@ -57,6 +57,7 @@ DAILY_STORY_PROMPT = """Write a short funny story (6-10 sentences, under 180 wor
 Rules:
 - Every idiom must appear in the story at least once, exactly as written
 - Use each idiom naturally — never surround it with words that mean the same thing (e.g. don't write "he bribed someone to grease their palms" — that's redundant; just write "he greased their palms")
+- When an idiom takes a person as object (e.g. "feel for someone"), use a specific pronoun or name, not a vague noun (e.g. "I feel for him" not "I feel for someone in his situation")
 - The story should be absurd and entertaining, flowing naturally from one idiom to the next
 - One continuous narrative — no separate paragraphs or sections
 
