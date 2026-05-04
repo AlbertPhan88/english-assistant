@@ -18,12 +18,24 @@ class Question:
     reask: bool = False     # True if this is a re-ask of a previously missed idiom
 
 
+_PLACEHOLDER = re.compile(r"^(someone'?s?|somebody'?s?|something|one'?s?)$", re.IGNORECASE)
+
+
 def _blank(text: str, phrase: str) -> str:
+    # Exact match first
     pattern = re.compile(re.escape(phrase), re.IGNORECASE)
     blanked, count = pattern.subn("___", text, count=1)
-    if count == 0:
-        blanked = f"{text}\n\n(Fill in: ___)"
-    return blanked
+    if count > 0:
+        return blanked
+
+    # Retry treating placeholder words (someone, something, etc.) as wildcards
+    parts = [r"\w+(?:'\w+)?" if _PLACEHOLDER.match(w) else re.escape(w) for w in phrase.split()]
+    flex = re.compile(r"\s+".join(parts), re.IGNORECASE)
+    blanked, count = flex.subn("___", text, count=1)
+    if count > 0:
+        return blanked
+
+    return f"{text}\n\n(Fill in: ___)"
 
 
 def build_question(conn, idiom_row: sqlite3.Row) -> Question:
