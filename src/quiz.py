@@ -18,11 +18,17 @@ class Question:
     reask: bool = False     # True if this is a re-ask of a previously missed idiom
 
 
-_PLACEHOLDER = re.compile(r"^(someone'?s?|somebody'?s?|something|one'?s?)$", re.IGNORECASE)
+_PLACEHOLDER = re.compile(
+    r"^(someone'?s?|somebody'?s?|something|one'?s?|"
+    r"oneself|yourself|himself|herself|itself|themselves|myself|ourselves|"
+    r"you|one|they)$",
+    re.IGNORECASE,
+)
 
 # Common irregular verb forms: base → [inflected, ...]
 _IRREGULAR = {
     "be": ["is", "are", "was", "were", "been", "being"],
+    "bite": ["bit", "bitten", "bites", "biting"],
     "break": ["broke", "broken", "breaks", "breaking"],
     "bring": ["brought", "brings", "bringing"],
     "buy": ["bought", "buys", "buying"],
@@ -62,16 +68,36 @@ _IRREGULAR = {
 }
 
 
+_MODALS: dict[str, list[str]] = {
+    "can": ["could", "cannot", "can't"],
+    "will": ["would", "won't", "wouldn't"],
+    "shall": ["should", "shouldn't"],
+    "may": ["might"],
+    "must": ["had to"],
+}
+
+
 def _verb_alternation(word: str) -> str:
     """Return a regex alternation matching base form + all known inflections."""
     base = word.lower()
     forms = [base] + _IRREGULAR.get(base, [])
-    # Add regular inflections not already present
     for suffix in ("s", "ed", "d", "ing"):
         candidate = base + suffix
         if candidate not in forms:
             forms.append(candidate)
     return "(?:" + "|".join(re.escape(f) for f in forms) + ")"
+
+
+def _word_pattern(word: str, is_first: bool = False) -> str:
+    """Regex pattern for one word in a phrase, handling placeholders and modals."""
+    if _PLACEHOLDER.match(word):
+        return r"\w+(?:'\w+)?"
+    low = word.lower()
+    if low in _MODALS:
+        return "(?:" + "|".join(re.escape(f) for f in [low] + _MODALS[low]) + ")"
+    if is_first:
+        return _verb_alternation(word)
+    return re.escape(word)
 
 
 def _blank(text: str, phrase: str) -> str:
@@ -90,11 +116,9 @@ def _blank(text: str, phrase: str) -> str:
     if count > 0:
         return blanked
 
-    # Step 3: inflect first word (verb conjugation) + placeholders for the rest
+    # Step 3: inflect first word + handle modals/placeholders throughout
     if words:
-        inflected_parts = [_verb_alternation(words[0])] + [
-            r"\w+(?:'\w+)?" if _PLACEHOLDER.match(w) else re.escape(w) for w in words[1:]
-        ]
+        inflected_parts = [_word_pattern(w, i == 0) for i, w in enumerate(words)]
         inflect = re.compile(r"\s+".join(inflected_parts), re.IGNORECASE)
         blanked, count = inflect.subn("___", text, count=1)
         if count > 0:
@@ -102,6 +126,27 @@ def _blank(text: str, phrase: str) -> str:
 
     # No match found — caller should treat this as unusable
     return ""
+
+
+_STEM_STOPWORDS = {
+    "the", "a", "an", "to", "in", "of", "on", "at", "for", "with",
+    "by", "up", "out", "off", "as", "is", "are", "was", "were",
+}
+
+
+def _is_self_answering(stem: str, phrase: str) -> bool:
+    """True if too many content words from the phrase are still visible in the stem."""
+    content = [
+        w.lower() for w in phrase.split()
+        if w.lower() not in _STEM_STOPWORDS and not _PLACEHOLDER.match(w)
+    ]
+    if not content:
+        return False
+    cleaned = re.sub(r"___", "", stem).lower()
+    matches = sum(
+        1 for w in content if re.search(r"\b" + re.escape(w) + r"\b", cleaned)
+    )
+    return matches >= max(1, len(content) - 1)
 
 
 def build_question(conn, idiom_row: sqlite3.Row) -> Question:
@@ -115,11 +160,11 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
         raise ValueError(f"Idiom {phrase!r} has no example or meaning.")
 
     stem = _blank(sentence, phrase)
-    if not stem or stem.strip() == "___":
+    if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
         # Example unusable — try story pool
         story = db.get_next_story(conn, idiom_row["id"]) or idiom_row["story"] or ""
         stem = _blank(story, phrase) if story else ""
-        if not stem or stem.strip() == "___":
+        if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
             raise ValueError(f"Idiom {phrase!r} has no usable fill-in context.")
 
     distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
