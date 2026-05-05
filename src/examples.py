@@ -40,6 +40,19 @@ Output ONE Vietnamese equivalent on a single line — in order of preference:
 
 One line only. No numbering, no explanation, no alternatives."""
 
+EXTRA_EXAMPLE_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), write ONE funny example sentence (max 15 words, absurd/unexpected). The idiom must appear verbatim. Output only the sentence, nothing else."""
+
+EXTRA_STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phrase}" (meaning: {meaning}).
+
+Rules:
+- The idiom must appear verbatim in the story
+- Use the idiom naturally — never surround it with words that mean the same thing
+- Each sentence builds tension or absurdity
+- Under 60 words total, no explanation of the idiom's meaning
+- Must be DIFFERENT in setting and characters from: "{existing_story}"
+
+Output only the story, nothing else."""
+
 STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phrase}" (meaning: {meaning}).
 
 Rules:
@@ -287,3 +300,66 @@ def tag_all_themes(db_path: str, client: Anthropic) -> int:
                 tagged += 1
         print(f"  {min(i + batch_size, total)}/{total} tagged ({tagged} so far)...", flush=True)
     return tagged
+
+
+def generate_extra_example(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+    resp = client.messages.create(
+        model=model,
+        max_tokens=100,
+        messages=[{"role": "user", "content": EXTRA_EXAMPLE_PROMPT.format(phrase=phrase, meaning=meaning)}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+    return next((l.strip() for l in raw.splitlines() if l.strip()), "")
+
+
+def generate_extra_story(phrase: str, meaning: str, existing_story: str, client: Anthropic, model: str = "claude-sonnet-4-6") -> str:
+    resp = client.messages.create(
+        model=model,
+        max_tokens=200,
+        messages=[{"role": "user", "content": EXTRA_STORY_PROMPT.format(phrase=phrase, meaning=meaning, existing_story=existing_story or "none")}],
+    )
+    return resp.content[0].text.strip() if resp.content else ""
+
+
+def fill_extra_examples(db_path: str, client: Anthropic, target: int = 5) -> int:
+    with db.connect(db_path) as conn:
+        rows = db.idioms_needing_examples(conn, target)
+    added = 0
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        needed = target - row["example_count"]
+        for _ in range(needed):
+            sentence = generate_extra_example(row["phrase"], row["meaning"], client)
+            if sentence:
+                with db.connect(db_path) as conn:
+                    db.add_example(conn, row["id"], sentence)
+                added += 1
+        if i % 100 == 0:
+            print(f"  {i}/{total} idioms ({added} examples added)...", flush=True)
+    return added
+
+
+def fill_extra_stories(db_path: str, client: Anthropic, target: int = 3) -> int:
+    with db.connect(db_path) as conn:
+        rows = db.idioms_needing_stories(conn, target)
+    added = 0
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        needed = target - row["story_count"]
+        # Pass the most recent existing story as context so Claude varies the new one
+        with db.connect(db_path) as conn:
+            existing_row = conn.execute(
+                "SELECT story FROM idiom_stories WHERE idiom_id = ? ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+        existing_story = existing_row["story"] if existing_row else ""
+        for _ in range(needed):
+            story = generate_extra_story(row["phrase"], row["meaning"], existing_story, client)
+            if story:
+                with db.connect(db_path) as conn:
+                    db.add_idiom_story(conn, row["id"], story)
+                added += 1
+                existing_story = story
+        if i % 50 == 0:
+            print(f"  {i}/{total} idioms ({added} stories added)...", flush=True)
+    return added

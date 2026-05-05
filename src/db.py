@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS idiom_examples (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    idiom_id  INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE,
+    sentence  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS idiom_stories (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    idiom_id  INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE,
+    story     TEXT NOT NULL
+);
 """
 
 
@@ -102,10 +114,20 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE reviews ADD COLUMN next_kind INTEGER NOT NULL DEFAULT 0")
     if "boot_phase" not in rev_cols:
         conn.execute("ALTER TABLE reviews ADD COLUMN boot_phase INTEGER NOT NULL DEFAULT -1")
-        # Existing reviewed idioms → already in SM-2
         conn.execute("UPDATE reviews SET boot_phase = 3 WHERE repetitions > 0")
-        # Existing unreviewed idioms → enter boot camp
         conn.execute("UPDATE reviews SET boot_phase = 0 WHERE repetitions = 0")
+    if "next_example_idx" not in rev_cols:
+        conn.execute("ALTER TABLE reviews ADD COLUMN next_example_idx INTEGER NOT NULL DEFAULT 0")
+    if "next_story_idx" not in rev_cols:
+        conn.execute("ALTER TABLE reviews ADD COLUMN next_story_idx INTEGER NOT NULL DEFAULT 0")
+
+    # Seed idiom_examples and idiom_stories from existing single columns (once)
+    conn.execute("CREATE TABLE IF NOT EXISTS idiom_examples (id INTEGER PRIMARY KEY AUTOINCREMENT, idiom_id INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE, sentence TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS idiom_stories (id INTEGER PRIMARY KEY AUTOINCREMENT, idiom_id INTEGER NOT NULL REFERENCES idioms(id) ON DELETE CASCADE, story TEXT NOT NULL)")
+    if conn.execute("SELECT COUNT(*) FROM idiom_examples").fetchone()[0] == 0:
+        conn.execute("INSERT INTO idiom_examples(idiom_id, sentence) SELECT id, example FROM idioms WHERE example IS NOT NULL AND example != ''")
+    if conn.execute("SELECT COUNT(*) FROM idiom_stories").fetchone()[0] == 0:
+        conn.execute("INSERT INTO idiom_stories(idiom_id, story) SELECT id, story FROM idioms WHERE story IS NOT NULL AND story != ''")
 
 
 def init(db_path: str) -> None:
@@ -191,6 +213,56 @@ def random_distractor_meanings(conn, exclude_id: int, n: int) -> list[sqlite3.Ro
     return list(conn.execute(
         "SELECT id, meaning FROM idioms WHERE id != ? ORDER BY RANDOM() LIMIT ?",
         (exclude_id, n),
+    ))
+
+
+def get_next_example(conn, idiom_id: int) -> str | None:
+    idx_row = conn.execute("SELECT next_example_idx FROM reviews WHERE idiom_id = ?", (idiom_id,)).fetchone()
+    idx = idx_row["next_example_idx"] if idx_row else 0
+    rows = conn.execute("SELECT sentence FROM idiom_examples WHERE idiom_id = ? ORDER BY id ASC", (idiom_id,)).fetchall()
+    if not rows:
+        return None
+    sentence = rows[idx % len(rows)]["sentence"]
+    conn.execute("UPDATE reviews SET next_example_idx = next_example_idx + 1 WHERE idiom_id = ?", (idiom_id,))
+    return sentence
+
+
+def get_next_story(conn, idiom_id: int) -> str | None:
+    idx_row = conn.execute("SELECT next_story_idx FROM reviews WHERE idiom_id = ?", (idiom_id,)).fetchone()
+    idx = idx_row["next_story_idx"] if idx_row else 0
+    rows = conn.execute("SELECT story FROM idiom_stories WHERE idiom_id = ? ORDER BY id ASC", (idiom_id,)).fetchall()
+    if not rows:
+        return None
+    story = rows[idx % len(rows)]["story"]
+    conn.execute("UPDATE reviews SET next_story_idx = next_story_idx + 1 WHERE idiom_id = ?", (idiom_id,))
+    return story
+
+
+def add_example(conn, idiom_id: int, sentence: str) -> None:
+    conn.execute("INSERT INTO idiom_examples(idiom_id, sentence) VALUES (?, ?)", (idiom_id, sentence))
+
+
+def add_idiom_story(conn, idiom_id: int, story: str) -> None:
+    conn.execute("INSERT INTO idiom_stories(idiom_id, story) VALUES (?, ?)", (idiom_id, story))
+
+
+def idioms_needing_examples(conn, target: int = 5) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        """SELECT i.id, i.phrase, i.meaning, COUNT(e.id) AS example_count
+           FROM idioms i LEFT JOIN idiom_examples e ON i.id = e.idiom_id
+           GROUP BY i.id HAVING COUNT(e.id) < ?
+           ORDER BY COUNT(e.id) ASC, i.id ASC""",
+        (target,),
+    ))
+
+
+def idioms_needing_stories(conn, target: int = 3) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        """SELECT i.id, i.phrase, i.meaning, COUNT(s.id) AS story_count
+           FROM idioms i LEFT JOIN idiom_stories s ON i.id = s.idiom_id
+           GROUP BY i.id HAVING COUNT(s.id) < ?
+           ORDER BY COUNT(s.id) ASC, i.id ASC""",
+        (target,),
     ))
 
 

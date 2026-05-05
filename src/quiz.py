@@ -40,14 +40,18 @@ def _blank(text: str, phrase: str) -> str:
 
 def build_question(conn, idiom_row: sqlite3.Row) -> Question:
     phrase = idiom_row["phrase"]
-    example = idiom_row["example"] or idiom_row["meaning"]
-    if not example:
+
+    # Rotate through pool of example sentences, fall back to column
+    sentence = db.get_next_example(conn, idiom_row["id"])
+    if not sentence:
+        sentence = idiom_row["example"] or idiom_row["meaning"]
+    if not sentence:
         raise ValueError(f"Idiom {phrase!r} has no example or meaning.")
 
-    stem = _blank(example, phrase)
-    # If blanking left no context (example was just the phrase), try story
+    stem = _blank(sentence, phrase)
+    # If blanking left no context, try story pool
     if stem.strip() == "___":
-        story = idiom_row["story"] if idiom_row["story"] else ""
+        story = db.get_next_story(conn, idiom_row["id"]) or idiom_row["story"] or ""
         if story:
             stem = _blank(story, phrase)
         if not story or stem.strip() == "___":
@@ -74,7 +78,10 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
 def build_reverse_question(conn, idiom_row: sqlite3.Row) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
-    story = idiom_row["story"] if idiom_row["story"] else (idiom_row["example"] or meaning)
+    # Rotate through story pool, fall back to column then example
+    story = db.get_next_story(conn, idiom_row["id"])
+    if not story:
+        story = idiom_row["story"] or idiom_row["example"] or meaning
 
     distractors = db.random_distractor_meanings(conn, idiom_row["id"], 3)
     if len(distractors) < 3:

@@ -68,6 +68,26 @@ def cmd_fill_stories(args) -> None:
     print(f"Generated stories for {filled} idiom(s).")
 
 
+def cmd_fill_extra_examples(args) -> None:
+    from anthropic import Anthropic
+    from . import config
+    from .examples import fill_extra_examples
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    added = fill_extra_examples(config.DB_PATH, client, target=5)
+    print(f"Added {added} extra example sentence(s).")
+
+
+def cmd_fill_extra_stories(args) -> None:
+    from anthropic import Anthropic
+    from . import config
+    from .examples import fill_extra_stories
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    added = fill_extra_stories(config.DB_PATH, client, target=3)
+    print(f"Added {added} extra story/stories.")
+
+
 def cmd_tag_themes(args) -> None:
     from anthropic import Anthropic
     from . import config
@@ -116,6 +136,8 @@ def main() -> None:
     p_ingest.add_argument("pdfs", nargs="+", metavar="PDF")
 
     sub.add_parser("fill-examples", help="Generate funny examples for idioms missing one")
+    sub.add_parser("fill-extra-examples", help="Generate up to 5 example sentences per idiom (Haiku)")
+    sub.add_parser("fill-extra-stories", help="Generate up to 3 stories per idiom (Sonnet)")
     sub.add_parser("fill-vietnamese", help="Generate Vietnamese equivalents for all idioms")
     sub.add_parser("review-vietnamese", help="Review and improve naive Vietnamese equivalents")
     sub.add_parser("fill-stories", help="Generate 3-sentence stories for all idioms")
@@ -131,6 +153,8 @@ def main() -> None:
         "init": cmd_init,
         "ingest": cmd_ingest,
         "fill-examples": cmd_fill_examples,
+        "fill-extra-examples": cmd_fill_extra_examples,
+        "fill-extra-stories": cmd_fill_extra_stories,
         "fill-vietnamese": cmd_fill_vietnamese,
         "review-vietnamese": cmd_review_vietnamese,
         "fill-stories": cmd_fill_stories,
