@@ -23,6 +23,10 @@ def _question_text(q: Question) -> str:
     prefix = "↩️ Try again — you missed this one before.\n\n" if q.reask else ""
     if q.kind == "reverse":
         return f"{prefix}What does '{q.phrase}' mean?\n\n{q.stem}\n\n{opts}"
+    if q.kind == "vietnamese":
+        return f"{prefix}Which English idiom matches?\n\n{q.stem}\n\n{opts}"
+    if q.kind == "completion":
+        return f"{prefix}{q.stem}\n\n{opts}"
     return f"{prefix}Fill in the blank:\n\n{q.stem}\n\n{opts}"
 
 

@@ -93,10 +93,19 @@ def _migrate(conn) -> None:
     if "idiom_ids" not in ds_cols:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN idiom_ids TEXT")
 
-    # Create app_settings table if it doesn't exist yet
     conn.execute(
         "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)"
     )
+
+    rev_cols = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if "next_kind" not in rev_cols:
+        conn.execute("ALTER TABLE reviews ADD COLUMN next_kind INTEGER NOT NULL DEFAULT 0")
+    if "boot_phase" not in rev_cols:
+        conn.execute("ALTER TABLE reviews ADD COLUMN boot_phase INTEGER NOT NULL DEFAULT -1")
+        # Existing reviewed idioms → already in SM-2
+        conn.execute("UPDATE reviews SET boot_phase = 3 WHERE repetitions > 0")
+        # Existing unreviewed idioms → enter boot camp
+        conn.execute("UPDATE reviews SET boot_phase = 0 WHERE repetitions = 0")
 
 
 def init(db_path: str) -> None:
@@ -113,7 +122,10 @@ def add_idiom(conn, phrase: str, meaning: str, example: str | None, source_pdf: 
     if cur.rowcount == 0:
         return None
     idiom_id = cur.lastrowid
-    conn.execute("INSERT OR IGNORE INTO reviews(idiom_id) VALUES (?)", (idiom_id,))
+    conn.execute(
+        "INSERT OR IGNORE INTO reviews(idiom_id, boot_phase) VALUES (?, 0)",
+        (idiom_id,),
+    )
     return idiom_id
 
 
@@ -179,6 +191,37 @@ def random_distractor_meanings(conn, exclude_id: int, n: int) -> list[sqlite3.Ro
     return list(conn.execute(
         "SELECT id, meaning FROM idioms WHERE id != ? ORDER BY RANDOM() LIMIT ?",
         (exclude_id, n),
+    ))
+
+
+def random_distractor_last_words(conn, exclude_id: int, n: int) -> list[str]:
+    """Return n random last-words from other idiom phrases (for completion questions)."""
+    rows = conn.execute(
+        "SELECT phrase FROM idioms WHERE id != ? ORDER BY RANDOM() LIMIT ?",
+        (exclude_id, n * 3),  # fetch extra to filter duplicates
+    ).fetchall()
+    seen: set[str] = set()
+    result: list[str] = []
+    for row in rows:
+        last = row["phrase"].strip().split()[-1].lower()
+        if last not in seen:
+            seen.add(last)
+            result.append(last)
+        if len(result) == n:
+            break
+    return result
+
+
+def boot_camp_idioms(conn, n: int) -> list[sqlite3.Row]:
+    """Follow-up boot camp idioms (phases 1 and 2 only — already introduced, due for next exposure)."""
+    return list(conn.execute(
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                  r.correct, r.wrong, r.boot_phase, r.next_kind
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.boot_phase IN (1, 2)
+           ORDER BY r.boot_phase ASC, i.id ASC
+           LIMIT ?""",
+        (n,),
     ))
 
 
@@ -284,21 +327,45 @@ def due_idioms(conn, today: date, limit: int) -> list[sqlite3.Row]:
 def apply_review(conn, idiom_id: int, quality: int) -> None:
     from .scheduler import sm2
     row = conn.execute(
-        "SELECT ease, interval, repetitions FROM reviews WHERE idiom_id = ?", (idiom_id,)
+        "SELECT ease, interval, repetitions, boot_phase, next_kind FROM reviews WHERE idiom_id = ?",
+        (idiom_id,),
     ).fetchone()
     if not row:
         return
-    ease, interval, reps = sm2(row["ease"], row["interval"], row["repetitions"], quality)
+
     from datetime import date, timedelta
-    due = (date.today() + timedelta(days=interval)).isoformat()
     now = datetime.utcnow().isoformat()
     correct_delta = 1 if quality >= 3 else 0
     wrong_delta = 0 if quality >= 3 else 1
-    conn.execute(
-        """UPDATE reviews SET ease=?, interval=?, repetitions=?, due_date=?, last_seen=?,
-           correct=correct+?, wrong=wrong+? WHERE idiom_id=?""",
-        (ease, interval, reps, due, now, correct_delta, wrong_delta, idiom_id),
-    )
+    boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
+
+    if 0 <= boot_phase <= 2:
+        # Still in boot camp — advance phase, due tomorrow regardless of quality
+        new_phase = boot_phase + 1
+        due = (date.today() + timedelta(days=1)).isoformat()
+        if new_phase == 3:
+            # Graduate to SM-2: first SM-2 interval = 1 day
+            conn.execute(
+                """UPDATE reviews SET boot_phase=3, interval=1, repetitions=1, due_date=?,
+                   last_seen=?, correct=correct+?, wrong=wrong+? WHERE idiom_id=?""",
+                (due, now, correct_delta, wrong_delta, idiom_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE reviews SET boot_phase=?, due_date=?, last_seen=?,
+                   correct=correct+?, wrong=wrong+? WHERE idiom_id=?""",
+                (new_phase, due, now, correct_delta, wrong_delta, idiom_id),
+            )
+    else:
+        # SM-2 mode
+        ease, interval, reps = sm2(row["ease"], row["interval"], row["repetitions"], quality)
+        due = (date.today() + timedelta(days=interval)).isoformat()
+        next_kind = ((row["next_kind"] or 0) + 1) % 4
+        conn.execute(
+            """UPDATE reviews SET ease=?, interval=?, repetitions=?, due_date=?, last_seen=?,
+               correct=correct+?, wrong=wrong+?, next_kind=? WHERE idiom_id=?""",
+            (ease, interval, reps, due, now, correct_delta, wrong_delta, next_kind, idiom_id),
+        )
 
 
 # --- Theme tagging ---
@@ -335,7 +402,8 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
     if exclude_ids:
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
-            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                       r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                 WHERE r.wrong > 0 AND r.last_seen <= ?
                 AND i.id NOT IN ({placeholders})
@@ -344,7 +412,8 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
             (cutoff, *exclude_ids, n),
         ))
     return list(conn.execute(
-        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                  r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE r.wrong > 0 AND r.last_seen <= ?
            ORDER BY r.last_seen DESC
@@ -354,22 +423,24 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
 
 
 def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
-    """New (repetitions=0) idioms with the given theme, ordered by id ASC."""
+    """New (boot_phase=0) idioms with the given theme, ordered by id ASC."""
     if exclude_ids:
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
-            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                       r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.repetitions = 0 AND i.theme = ?
+                WHERE r.boot_phase = 0 AND i.theme = ?
                 AND i.id NOT IN ({placeholders})
                 ORDER BY i.id ASC
                 LIMIT ?""",
             (theme, *exclude_ids, n),
         ))
     return list(conn.execute(
-        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                  r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.repetitions = 0 AND i.theme = ?
+           WHERE r.boot_phase = 0 AND i.theme = ?
            ORDER BY i.id ASC
            LIMIT ?""",
         (theme, n),
@@ -381,7 +452,7 @@ def advance_theme_if_exhausted(conn) -> None:
     current = get_setting(conn, "current_theme", THEME_ORDER[0])
     unseen_count = conn.execute(
         "SELECT COUNT(*) FROM idioms i JOIN reviews r ON i.id = r.idiom_id "
-        "WHERE r.repetitions = 0 AND i.theme = ?",
+        "WHERE r.boot_phase = 0 AND i.theme = ?",
         (current,),
     ).fetchone()[0]
     if unseen_count > 0:
@@ -395,7 +466,7 @@ def advance_theme_if_exhausted(conn) -> None:
         candidate = THEME_ORDER[(start_idx + offset) % len(THEME_ORDER)]
         count = conn.execute(
             "SELECT COUNT(*) FROM idioms i JOIN reviews r ON i.id = r.idiom_id "
-            "WHERE r.repetitions = 0 AND i.theme = ?",
+            "WHERE r.boot_phase = 0 AND i.theme = ?",
             (candidate,),
         ).fetchone()[0]
         if count > 0:
@@ -404,64 +475,66 @@ def advance_theme_if_exhausted(conn) -> None:
     # All themes exhausted — leave setting as-is
 
 
-def build_daily_rows(conn, today: date, total: int = 10) -> list[sqlite3.Row]:
-    """Build a clustered daily set: warm-up + SM-2 review + new from theme."""
+def build_daily_rows(conn, today: date, total: int = 15) -> list[sqlite3.Row]:
+    """Build a clustered daily set: boot camp + warm-up + SM-2 review + new from theme."""
     today_str = today.isoformat()
 
-    # Check if there are enough wrong answers for warm-up
-    total_wrong = conn.execute("SELECT SUM(wrong) FROM reviews").fetchone()[0] or 0
+    # Bucket 1: boot camp (4 slots) — phases 0/1/2
+    boot_rows = boot_camp_idioms(conn, 4)
+    boot_ids = [r["id"] for r in boot_rows]
 
-    # Bucket 1: warm-up (3 slots) — skip if total wrong < 3
-    warmup_target = 3
+    # Bucket 2: warm-up (3 slots) — recent wrong, not seen in 7+ days
+    total_wrong = conn.execute("SELECT SUM(wrong) FROM reviews").fetchone()[0] or 0
     warmup: list[sqlite3.Row] = []
     if total_wrong >= 3:
-        warmup = warm_up_idioms(conn, warmup_target, [])
-
+        warmup = warm_up_idioms(conn, 3, boot_ids)
     warmup_ids = [r["id"] for r in warmup]
 
-    # Bucket 2: SM-2 review (3 slots)
-    review_target = 3
-    if warmup_ids:
-        placeholders = ",".join("?" * len(warmup_ids))
+    # Bucket 3: SM-2 review (4 slots) — due today, graduated idioms only
+    exclude_ids = boot_ids + warmup_ids
+    review_target = 4
+    if exclude_ids:
+        placeholders = ",".join("?" * len(exclude_ids))
         review = list(conn.execute(
-            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                       r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.repetitions > 0 AND r.due_date <= ?
+                WHERE r.boot_phase >= 3 AND r.due_date <= ?
                 AND i.id NOT IN ({placeholders})
                 ORDER BY r.due_date ASC, r.ease ASC
                 LIMIT ?""",
-            (today_str, *warmup_ids, review_target),
+            (today_str, *exclude_ids, review_target),
         ))
     else:
         review = list(conn.execute(
-            """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+            """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                      r.correct, r.wrong, r.boot_phase, r.next_kind
                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-               WHERE r.repetitions > 0 AND r.due_date <= ?
+               WHERE r.boot_phase >= 3 AND r.due_date <= ?
                ORDER BY r.due_date ASC, r.ease ASC
                LIMIT ?""",
             (today_str, review_target),
         ))
-
     review_ids = [r["id"] for r in review]
-    exclude_ids = warmup_ids + review_ids
 
-    # Bucket 3: new from current theme (4 slots)
-    new_target = 4
+    # Bucket 4: new from current theme (4 slots)
+    exclude_ids = boot_ids + warmup_ids + review_ids
     advance_theme_if_exhausted(conn)
     current_theme = get_setting(conn, "current_theme", THEME_ORDER[0])
-    new_rows = new_idioms_from_theme(conn, current_theme, new_target, exclude_ids)
+    new_rows = new_idioms_from_theme(conn, current_theme, 4, exclude_ids)
 
-    all_rows = warmup + review + new_rows
+    all_rows = boot_rows + warmup + review + new_rows
     obtained = len(all_rows)
 
-    # If any bucket came up short, expand others to fill total
+    # Fill shortfall from any remaining idioms
     if obtained < total:
         shortfall = total - obtained
         all_ids = [r["id"] for r in all_rows]
         if all_ids:
             placeholders = ",".join("?" * len(all_ids))
             extra = list(conn.execute(
-                f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                           r.correct, r.wrong, r.boot_phase, r.next_kind
                     FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                     WHERE i.id NOT IN ({placeholders})
                     ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
@@ -470,7 +543,8 @@ def build_daily_rows(conn, today: date, total: int = 10) -> list[sqlite3.Row]:
             ))
         else:
             extra = list(conn.execute(
-                """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+                """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                          r.correct, r.wrong, r.boot_phase, r.next_kind
                    FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                    ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
                    LIMIT ?""",

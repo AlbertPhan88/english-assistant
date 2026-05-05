@@ -13,8 +13,8 @@ class Question:
     stem: str
     options: list[str]
     correct_index: int
-    kind: str = "forward"   # "forward" | "reverse"
-    phrase: str = ""        # shown in reverse question header
+    kind: str = "forward"   # "forward" | "reverse" | "vietnamese" | "completion"
+    phrase: str = ""        # shown in reverse/vietnamese question header
     reask: bool = False     # True if this is a re-ask of a previously missed idiom
 
 
@@ -94,6 +94,58 @@ def build_reverse_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
+def build_vietnamese_question(conn, idiom_row: sqlite3.Row) -> Question:
+    phrase = idiom_row["phrase"]
+    viet = idiom_row["vietnamese_equiv"] if idiom_row["vietnamese_equiv"] else ""
+    if not viet or viet == "—":
+        raise ValueError(f"Idiom {phrase!r} has no Vietnamese equivalent.")
+
+    distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
+    if len(distractors) < 3:
+        raise ValueError("Not enough idioms in DB to build distractors.")
+
+    options = [d["phrase"] for d in distractors] + [phrase]
+    random.shuffle(options)
+    correct_index = options.index(phrase)
+
+    return Question(
+        idiom_id=idiom_row["id"],
+        stem=f"Tương đương tiếng Việt: {viet}",
+        options=options,
+        correct_index=correct_index,
+        kind="vietnamese",
+        phrase=phrase,
+    )
+
+
+def build_completion_question(conn, idiom_row: sqlite3.Row) -> Question:
+    phrase = idiom_row["phrase"]
+    words = phrase.split()
+    if len(words) < 2:
+        raise ValueError(f"Idiom {phrase!r} too short for completion question.")
+
+    # Split: show all but last word, complete with last word
+    first_part = " ".join(words[:-1])
+    last_word = words[-1].lower()
+
+    distractor_words = db.random_distractor_last_words(conn, idiom_row["id"], 3)
+    if len(distractor_words) < 3:
+        raise ValueError("Not enough idioms in DB to build completion distractors.")
+
+    options = distractor_words + [last_word]
+    random.shuffle(options)
+    correct_index = options.index(last_word)
+
+    return Question(
+        idiom_id=idiom_row["id"],
+        stem=f"Complete the idiom:\n\n{first_part} ___",
+        options=options,
+        correct_index=correct_index,
+        kind="completion",
+        phrase=phrase,
+    )
+
+
 def _find_sentence(story: str, phrase: str) -> str | None:
     """Return the sentence from story that contains phrase, or None."""
     sentences = re.split(r'(?<=[.!?])\s+', story.strip())
@@ -130,22 +182,45 @@ def build_question_from_story(conn, idiom_row: sqlite3.Row, story: str) -> Quest
     )
 
 
-def build_questions_from_rows(conn, rows: list) -> list[Question]:
-    """Build questions from a pre-fetched list of idiom rows.
-    Every 3rd question is a reverse quiz (only if story or example available).
-    """
-    questions = []
-    for i, row in enumerate(rows):
+# Builders in fallback order for each kind index
+_KIND_BUILDERS = [
+    # 0: forward
+    [build_question, build_reverse_question],
+    # 1: reverse
+    [build_reverse_question, build_question],
+    # 2: vietnamese
+    [build_vietnamese_question, build_reverse_question, build_question],
+    # 3: completion
+    [build_completion_question, build_question, build_reverse_question],
+]
+
+# Boot camp phase → kind index (phase 2 tries vietnamese, falls back via _KIND_BUILDERS)
+_BOOT_KIND = [0, 1, 2]
+
+
+def _build_one(conn, row) -> Question:
+    """Dispatch to the right question builder based on boot_phase or next_kind."""
+    boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
+    if 0 <= boot_phase <= 2:
+        kind_idx = _BOOT_KIND[boot_phase]
+    else:
+        kind_idx = (row["next_kind"] or 0) % 4
+
+    for builder in _KIND_BUILDERS[kind_idx]:
         try:
-            if i % 3 == 2 and (row["story"] or row["example"]):
-                questions.append(build_reverse_question(conn, row))
-            else:
-                questions.append(build_question(conn, row))
+            return builder(conn, row)
         except ValueError:
-            try:
-                questions.append(build_reverse_question(conn, row))
-            except ValueError:
-                continue
+            continue
+    raise ValueError(f"Could not build any question for idiom {row['id']}")
+
+
+def build_questions_from_rows(conn, rows: list) -> list[Question]:
+    questions = []
+    for row in rows:
+        try:
+            questions.append(_build_one(conn, row))
+        except ValueError:
+            continue
     return questions
 
 
