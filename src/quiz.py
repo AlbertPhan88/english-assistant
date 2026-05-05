@@ -20,22 +20,88 @@ class Question:
 
 _PLACEHOLDER = re.compile(r"^(someone'?s?|somebody'?s?|something|one'?s?)$", re.IGNORECASE)
 
+# Common irregular verb forms: base → [inflected, ...]
+_IRREGULAR = {
+    "be": ["is", "are", "was", "were", "been", "being"],
+    "break": ["broke", "broken", "breaks", "breaking"],
+    "bring": ["brought", "brings", "bringing"],
+    "buy": ["bought", "buys", "buying"],
+    "catch": ["caught", "catches", "catching"],
+    "come": ["came", "comes", "coming"],
+    "cut": ["cuts", "cutting"],
+    "do": ["did", "done", "does", "doing"],
+    "fall": ["fell", "fallen", "falls", "falling"],
+    "find": ["found", "finds", "finding"],
+    "get": ["got", "gotten", "gets", "getting"],
+    "give": ["gave", "given", "gives", "giving"],
+    "go": ["went", "gone", "goes", "going"],
+    "have": ["had", "has", "having"],
+    "hit": ["hits", "hitting"],
+    "hold": ["held", "holds", "holding"],
+    "keep": ["kept", "keeps", "keeping"],
+    "know": ["knew", "known", "knows", "knowing"],
+    "lay": ["laid", "lays", "laying"],
+    "leave": ["left", "leaves", "leaving"],
+    "let": ["lets", "letting"],
+    "lose": ["lost", "loses", "losing"],
+    "make": ["made", "makes", "making"],
+    "put": ["puts", "putting"],
+    "run": ["ran", "runs", "running"],
+    "say": ["said", "says", "saying"],
+    "see": ["saw", "seen", "sees", "seeing"],
+    "send": ["sent", "sends", "sending"],
+    "sit": ["sat", "sits", "sitting"],
+    "speak": ["spoke", "spoken", "speaks", "speaking"],
+    "stand": ["stood", "stands", "standing"],
+    "take": ["took", "taken", "takes", "taking"],
+    "tell": ["told", "tells", "telling"],
+    "think": ["thought", "thinks", "thinking"],
+    "throw": ["threw", "thrown", "throws", "throwing"],
+    "win": ["won", "wins", "winning"],
+    "write": ["wrote", "written", "writes", "writing"],
+}
+
+
+def _verb_alternation(word: str) -> str:
+    """Return a regex alternation matching base form + all known inflections."""
+    base = word.lower()
+    forms = [base] + _IRREGULAR.get(base, [])
+    # Add regular inflections not already present
+    for suffix in ("s", "ed", "d", "ing"):
+        candidate = base + suffix
+        if candidate not in forms:
+            forms.append(candidate)
+    return "(?:" + "|".join(re.escape(f) for f in forms) + ")"
+
 
 def _blank(text: str, phrase: str) -> str:
-    # Exact match first
+    words = phrase.split()
+
+    # Step 1: exact match
     pattern = re.compile(re.escape(phrase), re.IGNORECASE)
     blanked, count = pattern.subn("___", text, count=1)
     if count > 0:
         return blanked
 
-    # Retry treating placeholder words (someone, something, etc.) as wildcards
-    parts = [r"\w+(?:'\w+)?" if _PLACEHOLDER.match(w) else re.escape(w) for w in phrase.split()]
+    # Step 2: placeholders as wildcards
+    parts = [r"\w+(?:'\w+)?" if _PLACEHOLDER.match(w) else re.escape(w) for w in words]
     flex = re.compile(r"\s+".join(parts), re.IGNORECASE)
     blanked, count = flex.subn("___", text, count=1)
     if count > 0:
         return blanked
 
-    return f"{text}\n\n(Fill in: ___)"
+    # Step 3: inflect first word (verb conjugation) + placeholders for the rest
+    if words:
+        inflected_parts = [_verb_alternation(words[0])] + [
+            r"\w+(?:'\w+)?" if _PLACEHOLDER.match(w) else re.escape(w) for w in words[1:]
+        ]
+        inflect = re.compile(r"\s+".join(inflected_parts), re.IGNORECASE)
+        blanked, count = inflect.subn("___", text, count=1)
+        if count > 0:
+            return blanked
+
+    # No match found — caller should treat this as unusable
+    return ""
 
 
 def build_question(conn, idiom_row: sqlite3.Row) -> Question:
@@ -49,12 +115,11 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
         raise ValueError(f"Idiom {phrase!r} has no example or meaning.")
 
     stem = _blank(sentence, phrase)
-    # If blanking left no context, try story pool
-    if stem.strip() == "___":
+    if not stem or stem.strip() == "___":
+        # Example unusable — try story pool
         story = db.get_next_story(conn, idiom_row["id"]) or idiom_row["story"] or ""
-        if story:
-            stem = _blank(story, phrase)
-        if not story or stem.strip() == "___":
+        stem = _blank(story, phrase) if story else ""
+        if not stem or stem.strip() == "___":
             raise ValueError(f"Idiom {phrase!r} has no usable fill-in context.")
 
     distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
