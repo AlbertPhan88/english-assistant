@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 LETTERS = ["A", "B", "C", "D"]
 
+# Cache message_id → (stem, kind) so handle_answer can show the filled-in sentence.
+# Lost on restart (acceptable — fallback to meaning-only display).
+_stem_cache: dict[int, tuple[str, str]] = {}
+
 
 def _question_text(q: Question) -> str:
     opts = "\n".join(f"{LETTERS[i]}. {opt}" for i, opt in enumerate(q.options))
@@ -43,11 +47,16 @@ def _keyboard(q: Question) -> InlineKeyboardMarkup:
 
 
 async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         chat_id=chat_id,
         text=_question_text(q),
         reply_markup=_keyboard(q),
     )
+    _stem_cache[msg.message_id] = (q.stem, q.kind)
+    # Prevent unbounded growth
+    if len(_stem_cache) > 2000:
+        oldest = next(iter(_stem_cache))
+        del _stem_cache[oldest]
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,15 +231,26 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     phrase = idiom["phrase"]
     meaning = idiom["meaning"]
-    # Show story if available, fall back to example, then meaning
-    story = idiom["story"] or idiom["example"] or meaning
     viet = idiom["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
 
-    if chosen == correct_index:
-        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}\n\n{story}"
+    # Retrieve the original question stem so the answer shows the same sentence
+    cached = _stem_cache.pop(query.message.message_id, None)
+    stem, kind = cached if cached else (None, "forward")
+
+    if stem and kind in ("forward", "completion"):
+        # Fill the blank with the correct answer
+        filled = stem.replace("___", f"[{phrase}]")
+        context_line = f"\n\n{filled}"
     else:
-        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}\n\n{story}"
+        # For reverse/vietnamese or no cache: show the story as context
+        story = idiom["story"] or idiom["example"] or meaning
+        context_line = f"\n\n{story}"
+
+    if chosen == correct_index:
+        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}{context_line}"
+    else:
+        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}{context_line}"
 
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(reply)
