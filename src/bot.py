@@ -403,6 +403,31 @@ async def send_weekly_review(application: Application) -> None:
             logger.error("Failed to send weekly review to %s: %s", chat_id, e)
 
 
+async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
+
+    from anthropic import Anthropic
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        system=(
+            "You are a friendly English idiom learning assistant embedded in a Telegram bot. "
+            "Answer questions about English idioms, phrases, grammar, or anything language-related. "
+            "Keep responses concise and conversational, under 200 words."
+        ),
+        messages=[{"role": "user", "content": msg.text}],
+    )
+
+    answer = resp.content[0].text.strip() if resp.content else "Sorry, I couldn't process that."
+    await msg.reply_text(answer)
+
+
 async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     if not msg or not msg.reply_to_message:
@@ -481,5 +506,6 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
     application.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_user_reply))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.REPLY & ~filters.COMMAND, handle_direct_message))
 
     application.run_polling(drop_pending_updates=True)
