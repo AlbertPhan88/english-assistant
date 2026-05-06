@@ -8,6 +8,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from . import config, db
@@ -401,6 +403,43 @@ async def send_weekly_review(application: Application) -> None:
             logger.error("Failed to send weekly review to %s: %s", chat_id, e)
 
 
+async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    if not msg or not msg.reply_to_message:
+        return
+    # Only handle replies to the bot's own messages
+    if not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id != context.bot.id:
+        return
+
+    user_question = msg.text or ""
+    bot_context = msg.reply_to_message.text or ""
+
+    await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
+
+    from anthropic import Anthropic
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        system=(
+            "You are a friendly English idiom learning assistant embedded in a Telegram quiz bot. "
+            "The user is learning English idioms. They have replied to a bot message (a quiz question, "
+            "answer feedback, or a story) with a follow-up question. "
+            "Use the context to give a helpful, concise answer. "
+            "Explain meanings, give extra examples, compare similar idioms, or clarify anything they ask. "
+            "Keep it conversational and under 200 words."
+        ),
+        messages=[{
+            "role": "user",
+            "content": f"Context from the bot:\n{bot_context}\n\nMy question:\n{user_question}",
+        }],
+    )
+
+    answer = resp.content[0].text.strip() if resp.content else "Sorry, I couldn't process that."
+    await msg.reply_text(answer)
+
+
 def run(db_path: str) -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -441,5 +480,6 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
+    application.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_user_reply))
 
     application.run_polling(drop_pending_updates=True)
