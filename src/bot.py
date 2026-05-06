@@ -54,7 +54,7 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
         text=_question_text(q),
         reply_markup=_keyboard(q),
     )
-    _stem_cache[msg.message_id] = (q.stem, q.kind)
+    _stem_cache[msg.message_id] = (q.stem, q.kind, q.options)
     # Prevent unbounded growth
     if len(_stem_cache) > 2000:
         oldest = next(iter(_stem_cache))
@@ -240,21 +240,24 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Retrieve the original question stem so the answer shows the same sentence
     cached = _stem_cache.pop(query.message.message_id, None)
-    stem, kind = cached if cached else (None, "forward")
+    stem, kind, options = cached if cached else (None, "forward", None)
 
     if stem and kind in ("forward", "completion"):
-        # Fill the blank with the correct answer
         filled = stem.replace("___", f"[{phrase}]")
         context_line = f"\n\n{filled}"
     else:
-        # For reverse/vietnamese or no cache: show the story as context
         story = idiom["story"] or idiom["example"] or meaning
         context_line = f"\n\n{story}"
 
     if chosen == correct_index:
         reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}{context_line}"
     else:
-        reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}{context_line}"
+        chosen_label = options[chosen] if options and chosen < len(options) else LETTERS[chosen]
+        reply = (
+            f"❌ You chose: {chosen_label}\n"
+            f"✅ Answer: {phrase}\n\n"
+            f"{meaning}{viet_line}{context_line}"
+        )
 
     await query.edit_message_reply_markup(reply_markup=None)
     await context.bot.send_message(
