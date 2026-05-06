@@ -253,7 +253,11 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply = f"❌ Wrong. Answer: {phrase}\n\n{meaning}{viet_line}{context_line}"
 
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(reply)
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=reply,
+        reply_to_message_id=query.message.message_id,
+    )
 
 
 async def send_daily_quiz(application: Application) -> None:
