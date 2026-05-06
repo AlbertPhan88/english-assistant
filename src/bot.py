@@ -410,15 +410,33 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
     from anthropic import Anthropic
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
-    resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        system=(
+    text = msg.text.strip()
+    is_single_word = len(text.split()) == 1 and text.isalpha()
+
+    if is_single_word:
+        prompt = (
+            f"Look up the English word: {text}\n\n"
+            "Reply in exactly this format (no extra lines):\n"
+            "🇻🇳 <Vietnamese translation(s), comma-separated if multiple>\n\n"
+            "📖 <English definition, 1-2 sentences, plain English>\n\n"
+            "💬 <one short example sentence using the word>"
+        )
+        system = "You are a concise bilingual dictionary (English–Vietnamese). Follow the format exactly."
+        max_tokens = 200
+    else:
+        prompt = text
+        system = (
             "You are a friendly English idiom learning assistant embedded in a Telegram bot. "
             "Answer questions about English idioms, phrases, grammar, or anything language-related. "
             "Keep responses concise and conversational, under 200 words."
-        ),
-        messages=[{"role": "user", "content": msg.text}],
+        )
+        max_tokens = 600
+
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
     )
 
     answer = resp.content[0].text.strip() if resp.content else "Sorry, I couldn't process that."
