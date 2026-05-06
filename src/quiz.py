@@ -149,11 +149,11 @@ def _is_self_answering(stem: str, phrase: str) -> bool:
     return matches >= max(1, len(content) - 1)
 
 
-def build_question(conn, idiom_row: sqlite3.Row) -> Question:
+def build_question(conn, idiom_row: sqlite3.Row, user_id: int = 0) -> Question:
     phrase = idiom_row["phrase"]
 
     # Rotate through pool of example sentences, fall back to column
-    sentence = db.get_next_example(conn, idiom_row["id"])
+    sentence = db.get_next_example(conn, idiom_row["id"], user_id)
     if not sentence:
         sentence = idiom_row["example"] or idiom_row["meaning"]
     if not sentence:
@@ -162,7 +162,7 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
     stem = _blank(sentence, phrase)
     if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
         # Example unusable — try story pool
-        story = db.get_next_story(conn, idiom_row["id"]) or idiom_row["story"] or ""
+        story = db.get_next_story(conn, idiom_row["id"], user_id) or idiom_row["story"] or ""
         stem = _blank(story, phrase) if story else ""
         if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
             raise ValueError(f"Idiom {phrase!r} has no usable fill-in context.")
@@ -185,11 +185,11 @@ def build_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
-def build_reverse_question(conn, idiom_row: sqlite3.Row) -> Question:
+def build_reverse_question(conn, idiom_row: sqlite3.Row, user_id: int = 0) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
     # Rotate through story pool, fall back to column then example
-    story = db.get_next_story(conn, idiom_row["id"])
+    story = db.get_next_story(conn, idiom_row["id"], user_id)
     if not story:
         story = idiom_row["story"] or idiom_row["example"] or meaning
 
@@ -315,7 +315,7 @@ _KIND_BUILDERS = [
 _BOOT_KIND = [0, 1, 2]
 
 
-def _build_one(conn, row) -> Question:
+def _build_one(conn, row, user_id: int = 0) -> Question:
     """Dispatch to the right question builder based on boot_phase or next_kind."""
     boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
     if 0 <= boot_phase <= 2:
@@ -325,23 +325,26 @@ def _build_one(conn, row) -> Question:
 
     for builder in _KIND_BUILDERS[kind_idx]:
         try:
+            sig = builder.__code__.co_varnames[:builder.__code__.co_argcount]
+            if "user_id" in sig:
+                return builder(conn, row, user_id)
             return builder(conn, row)
         except ValueError:
             continue
     raise ValueError(f"Could not build any question for idiom {row['id']}")
 
 
-def build_questions_from_rows(conn, rows: list) -> list[Question]:
+def build_questions_from_rows(conn, rows: list, user_id: int = 0) -> list[Question]:
     questions = []
     for row in rows:
         try:
-            questions.append(_build_one(conn, row))
+            questions.append(_build_one(conn, row, user_id))
         except ValueError:
             continue
     return questions
 
 
-def build_daily_set(conn, n: int) -> list[Question]:
+def build_daily_set(conn, n: int, user_id: int = 0) -> list[Question]:
     today = date.today()
-    rows = db.build_daily_rows(conn, today, n)
-    return build_questions_from_rows(conn, rows)
+    rows = db.build_daily_rows(conn, today, n, user_id)
+    return build_questions_from_rows(conn, rows, user_id)

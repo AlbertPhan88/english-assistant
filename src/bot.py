@@ -89,10 +89,10 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             idiom = db.get_idiom(conn, r["idiom_id"])
             if idiom:
                 try:
-                    q = build_question(conn, idiom)
+                    q = build_question(conn, idiom, chat_id)
                 except ValueError:
                     try:
-                        q = build_reverse_question(conn, idiom)
+                        q = build_reverse_question(conn, idiom, chat_id)
                     except ValueError:
                         continue
                 q.reask = True
@@ -100,8 +100,8 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         remaining = n - len(reask_questions)
         if remaining > 0:
-            rows = db.build_daily_rows(conn, date.today(), remaining)
-            new_questions = build_questions_from_rows(conn, rows)
+            rows = db.build_daily_rows(conn, date.today(), remaining, chat_id)
+            new_questions = build_questions_from_rows(conn, rows, chat_id)
         else:
             new_questions = []
 
@@ -114,13 +114,14 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
     with db.connect(config.DB_PATH) as conn:
         total = conn.execute("SELECT COUNT(*) FROM idioms").fetchone()[0]
         reviewed = conn.execute(
-            "SELECT COUNT(*) FROM reviews WHERE repetitions > 0"
+            "SELECT COUNT(*) FROM reviews WHERE user_id = ? AND repetitions > 0", (user_id,)
         ).fetchone()[0]
         row = conn.execute(
-            "SELECT SUM(correct) as c, SUM(wrong) as w FROM reviews"
+            "SELECT SUM(correct) as c, SUM(wrong) as w FROM reviews WHERE user_id = ?", (user_id,)
         ).fetchone()
         correct, wrong = row["c"] or 0, row["w"] or 0
         total_ans = correct + wrong
@@ -128,8 +129,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         weakest = conn.execute(
             """SELECT i.phrase, r.ease, r.correct, r.wrong
                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-               WHERE r.repetitions > 0
-               ORDER BY r.ease ASC LIMIT 5"""
+               WHERE r.user_id = ? AND r.repetitions > 0
+               ORDER BY r.ease ASC LIMIT 5""",
+            (user_id,),
         ).fetchall()
 
     lines = [
@@ -174,7 +176,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             story_idioms = db.get_idioms_by_ids(conn, idiom_ids_str) if idiom_ids_str else []
     else:
         with db.connect(config.DB_PATH) as conn:
-            rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT)
+            rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
             story_idioms = [
                 {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
                 for r in rows
@@ -227,7 +229,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     with db.connect(config.DB_PATH) as conn:
         idiom = db.get_idiom(conn, idiom_id)
         quality = 5 if chosen == correct_index else 2
-        db.apply_review(conn, idiom_id, quality)
+        db.apply_review(conn, idiom_id, quality, chat_id)
         if chosen != correct_index:
             db.add_reask(conn, chat_id, idiom_id)
 
@@ -271,16 +273,18 @@ async def send_daily_quiz(application: Application) -> None:
 
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
-        iotd = db.weakest_idiom(conn)
-        rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT)
 
-    if not rows:
-        logger.warning("Daily quiz: no questions available.")
+    if not users:
         return
+
+    # Generate a shared daily story based on the first user's due idioms
+    first_uid = users[0]
+    with db.connect(config.DB_PATH) as conn:
+        story_rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT, first_uid)
 
     story_idioms = [
         {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
-        for r in rows
+        for r in story_rows
     ]
     idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
     phrases_str = "\n".join(
@@ -288,7 +292,6 @@ async def send_daily_quiz(application: Application) -> None:
         for i in story_idioms
     )
 
-    # Step 1: generate English story + Vietnamese translation
     daily_story = ""
     story_vi = ""
     try:
@@ -300,17 +303,17 @@ async def send_daily_quiz(application: Application) -> None:
     except Exception as e:
         logger.error("Failed to generate daily story: %s", e)
 
-    # Step 2: build quiz questions using stored per-idiom examples (not story sentences)
-    with db.connect(config.DB_PATH) as conn:
-        questions = build_questions_from_rows(conn, rows)
-
-    if not questions:
-        logger.warning("Daily quiz: failed to build questions.")
-        return
-
     for chat_id in users:
         try:
-            # Idiom of the Day — weakest idiom as a reading item
+            with db.connect(config.DB_PATH) as conn:
+                iotd = db.weakest_idiom(conn, chat_id)
+                rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT, chat_id)
+                questions = build_questions_from_rows(conn, rows, chat_id)
+
+            if not questions:
+                logger.warning("Daily quiz: no questions for user %s", chat_id)
+                continue
+
             if iotd:
                 iotd_phrase = iotd["phrase"]
                 iotd_meaning = iotd["meaning"]
@@ -323,7 +326,6 @@ async def send_daily_quiz(application: Application) -> None:
                     text=f"🌟 Idiom of the Day\n\n{iotd_phrase}\n{iotd_meaning}{viet_line}{story_line}",
                 )
 
-            # Daily story — read this, then the quiz will test you on it
             if daily_story:
                 vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
                 await application.bot.send_message(
@@ -349,44 +351,39 @@ async def send_weekly_review(application: Application) -> None:
 
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
-        rows = db.weak_idioms_this_week(conn, 10)
-
-    if not rows:
-        return
-
-    story_idioms = [
-        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
-        for r in rows
-    ]
-
-    # Build bullet list with accuracy
-    bullet_lines = []
-    for r in rows:
-        total_ans = (r["correct"] or 0) + (r["wrong"] or 0)
-        pct = round((r["correct"] or 0) / total_ans * 100) if total_ans else 0
-        bullet_lines.append(f"• {r['phrase']} ({pct}% correct)")
-    bullets = "\n".join(bullet_lines)
-
-    # Generate story + Vietnamese translation
-    daily_story = ""
-    story_vi = ""
-    phrases_str = "\n".join(
-        f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
-        for i in story_idioms
-    )
-    try:
-        daily_story = generate_daily_story(story_idioms, client)
-        if daily_story:
-            story_vi = translate_to_vietnamese(daily_story, client, idioms=story_idioms)
-    except Exception as e:
-        logger.error("Failed to generate weekly review story: %s", e)
-
-    # Build questions
-    with db.connect(config.DB_PATH) as conn:
-        questions = build_questions_from_rows(conn, rows)
 
     for chat_id in users:
         try:
+            with db.connect(config.DB_PATH) as conn:
+                rows = db.weak_idioms_this_week(conn, 10, chat_id)
+                if not rows:
+                    continue
+                questions = build_questions_from_rows(conn, rows, chat_id)
+
+            story_idioms = [
+                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+                for r in rows
+            ]
+            bullet_lines = []
+            for r in rows:
+                total_ans = (r["correct"] or 0) + (r["wrong"] or 0)
+                pct = round((r["correct"] or 0) / total_ans * 100) if total_ans else 0
+                bullet_lines.append(f"• {r['phrase']} ({pct}% correct)")
+            bullets = "\n".join(bullet_lines)
+
+            phrases_str = "\n".join(
+                f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+                for i in story_idioms
+            )
+            daily_story = ""
+            story_vi = ""
+            try:
+                daily_story = generate_daily_story(story_idioms, client)
+                if daily_story:
+                    story_vi = translate_to_vietnamese(daily_story, client, idioms=story_idioms)
+            except Exception as e:
+                logger.error("Failed to generate weekly review story for %s: %s", chat_id, e)
+
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=f"📅 Weekly Review — your toughest idioms this week:\n\n{bullets}",
