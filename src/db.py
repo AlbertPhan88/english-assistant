@@ -178,6 +178,12 @@ def _migrate(conn) -> None:
     if "user_id" not in settings_cols:
         _migrate_settings_to_multiuser(conn)
 
+    # Backfill review rows for any registered user missing them
+    conn.execute(
+        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase) "
+        "SELECT u.chat_id, i.id, 0 FROM users u CROSS JOIN idioms i"
+    )
+
     # Add missing columns to idioms
     cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
     if "story" not in cols:
