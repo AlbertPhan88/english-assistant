@@ -549,7 +549,7 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
         from datetime import timedelta
         ease, interval, reps = sm2(row["ease"], row["interval"], row["repetitions"], quality)
         due = (date.today() + timedelta(days=interval)).isoformat()
-        next_kind = ((row["next_kind"] or 0) + 1) % 4
+        next_kind = ((row["next_kind"] or 0) + 1) % 5
         conn.execute(
             """UPDATE reviews SET ease=?, interval=?, repetitions=?, due_date=?, last_seen=?,
                correct=correct+?, wrong=wrong+?, next_kind=?

@@ -19,9 +19,25 @@ logger = logging.getLogger(__name__)
 
 LETTERS = ["A", "B", "C", "D"]
 
-# Cache message_id → (stem, kind) so handle_answer can show the filled-in sentence.
+# Cache message_id → (stem, kind, options) so handle_answer can show the filled-in sentence.
 # Lost on restart (acceptable — fallback to meaning-only display).
-_stem_cache: dict[int, tuple[str, str]] = {}
+_stem_cache: dict[int, tuple[str, str, list]] = {}
+
+# Cache message_id → {idiom_id, phrase, user_id} for production (free-write) questions.
+_production_cache: dict[int, dict] = {}
+
+PRODUCTION_EVAL_PROMPT = """You are an English teacher evaluating a Vietnamese learner's use of an English idiom.
+
+Idiom: "{phrase}"
+Meaning: {meaning}
+
+Their sentence: "{sentence}"
+
+Respond in exactly this format:
+Line 1: CORRECT or INCORRECT
+Line 2+: 2-3 sentences of feedback. If INCORRECT, explain why and show a corrected version.
+
+Be encouraging but honest. Judge whether the idiom is used naturally and grammatically correctly."""
 
 
 def _question_text(q: Question) -> str:
@@ -33,11 +49,14 @@ def _question_text(q: Question) -> str:
         return f"{prefix}Which English idiom matches?\n\n{q.stem}\n\n{opts}"
     if q.kind == "completion":
         return f"{prefix}{q.stem}\n\n{opts}"
+    if q.kind == "production":
+        return f"{prefix}✍️ Use it in a sentence!\n\n{q.stem}\n\nReply to this message with your sentence 👇"
     return f"{prefix}Fill in the blank:\n\n{q.stem}\n\n{opts}"
 
 
-def _keyboard(q: Question) -> InlineKeyboardMarkup:
-    # Encode correct_index in every button so answers survive bot restarts
+def _keyboard(q: Question) -> InlineKeyboardMarkup | None:
+    if q.kind == "production":
+        return None
     buttons = [
         InlineKeyboardButton(
             LETTERS[i],
@@ -54,11 +73,18 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
         text=_question_text(q),
         reply_markup=_keyboard(q),
     )
-    _stem_cache[msg.message_id] = (q.stem, q.kind, q.options)
-    # Prevent unbounded growth
-    if len(_stem_cache) > 2000:
-        oldest = next(iter(_stem_cache))
-        del _stem_cache[oldest]
+    if q.kind == "production":
+        _production_cache[msg.message_id] = {
+            "idiom_id": q.idiom_id,
+            "phrase": q.phrase,
+            "user_id": chat_id,
+        }
+        if len(_production_cache) > 500:
+            del _production_cache[next(iter(_production_cache))]
+    else:
+        _stem_cache[msg.message_id] = (q.stem, q.kind, q.options)
+        if len(_stem_cache) > 2000:
+            del _stem_cache[next(iter(_stem_cache))]
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -446,12 +472,59 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
     await msg.reply_text(answer)
 
 
+async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYPE, prod: dict, user_sentence: str) -> None:
+    await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+
+    from anthropic import Anthropic
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    idiom_id = prod["idiom_id"]
+    phrase = prod["phrase"]
+    user_id = prod["user_id"]
+
+    with db.connect(config.DB_PATH) as conn:
+        idiom = db.get_idiom(conn, idiom_id)
+    meaning = idiom["meaning"] if idiom else ""
+
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": PRODUCTION_EVAL_PROMPT.format(
+            phrase=phrase, meaning=meaning, sentence=user_sentence,
+        )}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+
+    lines = [l.strip() for l in raw.splitlines() if l.strip()]
+    result_line = lines[0].upper() if lines else ""
+    feedback = "\n".join(lines[1:]) if len(lines) > 1 else raw
+
+    correct = result_line.startswith("CORRECT")
+    quality = 5 if correct else 2
+
+    with db.connect(config.DB_PATH) as conn:
+        db.apply_review(conn, idiom_id, quality, user_id)
+        if not correct:
+            db.add_reask(conn, update.message.chat_id, idiom_id)
+
+    icon = "✅" if correct else "❌"
+    await update.message.reply_text(f"{icon} {feedback}")
+
+
 async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     if not msg or not msg.reply_to_message:
         return
     # Only handle replies to the bot's own messages
     if not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id != context.bot.id:
+        return
+
+    replied_id = msg.reply_to_message.message_id
+
+    # Check if this is a reply to a production question
+    prod = _production_cache.pop(replied_id, None)
+    if prod:
+        await _evaluate_production(update, context, prod, msg.text or "")
         return
 
     user_question = msg.text or ""

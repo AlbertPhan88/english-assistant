@@ -13,7 +13,7 @@ class Question:
     stem: str
     options: list[str]
     correct_index: int
-    kind: str = "forward"   # "forward" | "reverse" | "vietnamese" | "completion"
+    kind: str = "forward"   # "forward" | "reverse" | "vietnamese" | "completion" | "production"
     phrase: str = ""        # shown in reverse/vietnamese question header
     reask: bool = False     # True if this is a re-ask of a previously missed idiom
 
@@ -263,6 +263,32 @@ def build_completion_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
+_SITUATIONS = [
+    "chatting with a friend",
+    "at work discussing a problem",
+    "texting someone about something uncomfortable",
+    "talking to your boss or teacher",
+    "during a disagreement with someone",
+    "catching up with a colleague",
+    "in a group conversation",
+]
+
+
+def build_production_question(conn, idiom_row: sqlite3.Row) -> Question:
+    phrase = idiom_row["phrase"]
+    meaning = idiom_row["meaning"]
+    situation = random.choice(_SITUATIONS)
+    stem = f'"{phrase}"\nMeaning: {meaning}\n\nSituation: {situation}'
+    return Question(
+        idiom_id=idiom_row["id"],
+        stem=stem,
+        options=[],
+        correct_index=-1,
+        kind="production",
+        phrase=phrase,
+    )
+
+
 def _find_sentence(story: str, phrase: str) -> str | None:
     """Return the sentence from story that contains phrase, or None."""
     sentences = re.split(r'(?<=[.!?])\s+', story.strip())
@@ -309,6 +335,8 @@ _KIND_BUILDERS = [
     [build_vietnamese_question, build_reverse_question, build_question],
     # 3: completion
     [build_completion_question, build_question, build_reverse_question],
+    # 4: production (free-write)
+    [build_production_question, build_question, build_reverse_question],
 ]
 
 # Boot camp phase → kind index (phase 2 tries vietnamese, falls back via _KIND_BUILDERS)
