@@ -756,7 +756,8 @@ def weak_idioms_this_week(conn, n: int, user_id: int) -> list[sqlite3.Row]:
     from datetime import timedelta
     cutoff = (date.today() - timedelta(days=7)).isoformat()
     return list(conn.execute(
-        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                  r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE r.user_id = ? AND r.last_seen >= ?
            ORDER BY CAST(r.wrong AS REAL) / (r.correct + r.wrong + 1) DESC
