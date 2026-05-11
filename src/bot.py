@@ -67,7 +67,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db.register_user(conn, user.id, user.username)
     await update.message.reply_text(
         f"Hi {user.first_name}!\n\n"
-        "I'll send you 10 idiom quizzes every day at 6 AM.\n"
+        "I'll send you 15 idiom quizzes every day at 6 AM.\n"
         "Type /quiz anytime for an extra set, /stats to see your progress."
     )
 
