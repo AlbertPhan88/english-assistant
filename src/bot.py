@@ -126,8 +126,8 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         remaining = n - len(reask_questions)
         if remaining > 0:
-            rows = db.build_daily_rows(conn, date.today(), remaining, chat_id)
-            new_questions = build_questions_from_rows(conn, rows, chat_id)
+            rows = db.build_daily_rows(conn, date.today(), remaining + 5, chat_id)
+            new_questions = build_questions_from_rows(conn, rows, chat_id)[:remaining]
         else:
             new_questions = []
 
@@ -336,8 +336,9 @@ async def send_daily_quiz(application: Application) -> None:
         try:
             with db.connect(config.DB_PATH) as conn:
                 iotd = db.weakest_idiom(conn, chat_id)
-                rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT, chat_id)
+                rows = db.build_daily_rows(conn, today, config.DAILY_IDIOM_COUNT + 10, chat_id)
                 questions = build_questions_from_rows(conn, rows, chat_id)
+            questions = questions[:config.DAILY_IDIOM_COUNT]
 
             if not questions:
                 logger.warning("Daily quiz: no questions for user %s", chat_id)
@@ -354,6 +355,8 @@ async def send_daily_quiz(application: Application) -> None:
                     chat_id=chat_id,
                     text=f"🌟 Idiom of the Day\n\n{iotd_phrase}\n{iotd_meaning}{viet_line}{story_line}",
                 )
+                with db.connect(config.DB_PATH) as conn:
+                    db.mark_idiom_of_the_day(conn, chat_id, iotd["id"], today)
 
             if daily_story:
                 vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""

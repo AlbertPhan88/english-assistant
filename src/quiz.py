@@ -134,6 +134,11 @@ _STEM_STOPWORDS = {
 }
 
 
+def _has_enough_context(stem: str) -> bool:
+    """Reject stems where the blank has fewer than 4 words of surrounding context."""
+    return len(stem.replace("___", "").split()) >= 4
+
+
 def _is_self_answering(stem: str, phrase: str) -> bool:
     """True if too many content words from the phrase are still visible in the stem."""
     content = [
@@ -160,11 +165,11 @@ def build_question(conn, idiom_row: sqlite3.Row, user_id: int = 0) -> Question:
         raise ValueError(f"Idiom {phrase!r} has no example or meaning.")
 
     stem = _blank(sentence, phrase)
-    if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
+    if not stem or stem.strip() == "___" or not _has_enough_context(stem) or _is_self_answering(stem, phrase):
         # Example unusable — try story pool
         story = db.get_next_story(conn, idiom_row["id"], user_id) or idiom_row["story"] or ""
         stem = _blank(story, phrase) if story else ""
-        if not stem or stem.strip() == "___" or _is_self_answering(stem, phrase):
+        if not stem or stem.strip() == "___" or not _has_enough_context(stem) or _is_self_answering(stem, phrase):
             raise ValueError(f"Idiom {phrase!r} has no usable fill-in context.")
 
     distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
@@ -278,7 +283,13 @@ def build_production_question(conn, idiom_row: sqlite3.Row) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
     situation = random.choice(_SITUATIONS)
-    stem = f'"{phrase}"\nMeaning: {meaning}\n\nSituation: {situation}'
+    viet = idiom_row["vietnamese_equiv"] or ""
+    viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
+    stem = (
+        f"Meaning: {meaning}{viet_line}\n\n"
+        f"Situation: {situation}\n\n"
+        "Recall the idiom that fits and use it in a sentence."
+    )
     return Question(
         idiom_id=idiom_row["id"],
         stem=stem,
@@ -307,6 +318,8 @@ def build_question_from_story(conn, idiom_row: sqlite3.Row, story: str) -> Quest
         return build_question(conn, idiom_row)
 
     stem = _blank(sentence, phrase)
+    if not stem or not _has_enough_context(stem):
+        return build_question(conn, idiom_row)
     distractors = db.random_distractor_idioms(conn, idiom_row["id"], 3)
     if len(distractors) < 3:
         raise ValueError("Not enough idioms for distractors.")
@@ -326,30 +339,33 @@ def build_question_from_story(conn, idiom_row: sqlite3.Row, story: str) -> Quest
 
 
 # Builders in fallback order for each kind index
+# SM-2 rotation: forward → production → reverse → production → completion
 _KIND_BUILDERS = [
     # 0: forward
     [build_question, build_reverse_question],
-    # 1: reverse
-    [build_reverse_question, build_question],
-    # 2: vietnamese
-    [build_vietnamese_question, build_reverse_question, build_question],
-    # 3: completion
-    [build_completion_question, build_question, build_reverse_question],
-    # 4: production (free-write)
+    # 1: production (SM-2 early, ~day 10)
     [build_production_question, build_question, build_reverse_question],
+    # 2: reverse
+    [build_reverse_question, build_question],
+    # 3: production (SM-2 mid, ~day 63)
+    [build_production_question, build_question, build_reverse_question],
+    # 4: completion
+    [build_completion_question, build_question, build_reverse_question],
 ]
 
-# Boot camp phase → kind index (phase 2 tries vietnamese, falls back via _KIND_BUILDERS)
-_BOOT_KIND = [0, 1, 2]
+# Boot phase 0→forward, phase 1→reverse; phase 2 handled specially in _build_one
+_BOOT_KIND = [0, 2]
 
 
 def _build_one(conn, row, user_id: int = 0) -> Question:
     """Dispatch to the right question builder based on boot_phase or next_kind."""
     boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
     if 0 <= boot_phase <= 2:
+        if boot_phase == 2:
+            return build_production_question(conn, row)
         kind_idx = _BOOT_KIND[boot_phase]
     else:
-        kind_idx = (row["next_kind"] or 0) % 4
+        kind_idx = (row["next_kind"] or 0) % 5
 
     for builder in _KIND_BUILDERS[kind_idx]:
         try:

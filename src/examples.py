@@ -40,13 +40,14 @@ Output ONE Vietnamese equivalent on a single line — in order of preference:
 
 One line only. No numbering, no explanation, no alternatives."""
 
-EXTRA_EXAMPLE_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), write ONE funny example sentence (max 15 words, absurd/unexpected). The idiom must appear verbatim. Output only the sentence, nothing else."""
+EXTRA_EXAMPLE_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), write ONE funny example sentence (max 15 words, absurd/unexpected). The idiom must appear verbatim. Replace placeholder words like "one's", "someone's", "someone", "somebody" with a specific name or pronoun. Output only the sentence, nothing else."""
 
 EXTRA_STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phrase}" (meaning: {meaning}).
 
 Rules:
 - The idiom must appear verbatim in the story
 - Use the idiom naturally — never surround it with words that mean the same thing
+- Replace placeholder words like "one's", "someone's", "someone", "somebody" with a specific name or pronoun based on the character (e.g. "his praise", "her patience", "Tim's advice")
 - Each sentence builds tension or absurdity
 - Under 60 words total, no explanation of the idiom's meaning
 - Must be DIFFERENT in setting and characters from: "{existing_story}"
@@ -58,6 +59,7 @@ STORY_PROMPT = """Write a 3-sentence funny mini-story that uses the idiom "{phra
 Rules:
 - The idiom must appear verbatim in the story
 - Use the idiom naturally — never surround it with words that mean the same thing (e.g. don't write "he bribed someone to grease their palms" — that's redundant)
+- Replace placeholder words like "one's", "someone's", "someone", "somebody" with a specific name or pronoun based on the character (e.g. "his praise", "her patience", "Tim's advice")
 - Each sentence builds tension or absurdity
 - Under 60 words total, no explanation of the idiom's meaning
 
@@ -70,6 +72,7 @@ DAILY_STORY_PROMPT = """Write a short funny story (6-10 sentences, under 180 wor
 Rules:
 - Every idiom must appear in the story at least once, exactly as written
 - Use each idiom naturally — never surround it with words that mean the same thing (e.g. don't write "he bribed someone to grease their palms" — that's redundant; just write "he greased their palms")
+- Replace placeholder words like "one's", "someone's", "someone", "somebody" with a specific name or pronoun based on the character (e.g. "his praise", "her patience", "Tim's advice")
 - When an idiom takes a person as object (e.g. "feel for someone"), use a specific pronoun or name, not a vague noun (e.g. "I feel for him" not "I feel for someone in his situation")
 - The story should be absurd and entertaining, flowing naturally from one idiom to the next
 - One continuous narrative — no separate paragraphs or sections

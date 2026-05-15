@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     next_kind        INTEGER NOT NULL DEFAULT 0,
     next_example_idx INTEGER NOT NULL DEFAULT 0,
     next_story_idx   INTEGER NOT NULL DEFAULT 0,
+    last_iotd_at     TEXT,
     PRIMARY KEY (user_id, idiom_id)
 );
 
@@ -183,6 +184,10 @@ def _migrate(conn) -> None:
         "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase) "
         "SELECT u.chat_id, i.id, 0 FROM users u CROSS JOIN idioms i"
     )
+
+    rev_cols2 = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if "last_iotd_at" not in rev_cols2:
+        conn.execute("ALTER TABLE reviews ADD COLUMN last_iotd_at TEXT")
 
     # Add missing columns to idioms
     cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
@@ -476,12 +481,40 @@ def build_phrases_str(conn, idiom_ids_str: str) -> str:
 
 
 def weakest_idiom(conn, user_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        """SELECT i.* FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.repetitions > 0
-           ORDER BY r.ease ASC, r.wrong DESC LIMIT 1""",
-        (user_id,),
-    ).fetchone()
+    """Pick the user's currently weakest idiom for Idiom of the Day.
+
+    Ranks by lifetime wrong-rate (with a min sample size), prefers items
+    seen recently, and skips anything that was Idiom of the Day in the
+    past 7 days. Falls back to looser filters when nothing matches.
+    """
+    base = """
+        SELECT i.* FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+        WHERE r.user_id = ?
+          AND (r.last_iotd_at IS NULL OR r.last_iotd_at < date('now', '-7 days'))
+          AND (r.correct + r.wrong) > 0
+          {extra}
+        ORDER BY (CAST(r.wrong AS REAL) / (r.correct + r.wrong)) DESC,
+                 r.wrong DESC,
+                 r.last_seen DESC
+        LIMIT 1
+    """
+    filters = [
+        "AND (r.correct + r.wrong) >= 2 AND r.last_seen >= date('now', '-30 days')",
+        "AND (r.correct + r.wrong) >= 2",
+        "",
+    ]
+    for extra in filters:
+        row = conn.execute(base.format(extra=extra), (user_id,)).fetchone()
+        if row:
+            return row
+    return None
+
+
+def mark_idiom_of_the_day(conn, user_id: int, idiom_id: int, day: date) -> None:
+    conn.execute(
+        "UPDATE reviews SET last_iotd_at = ? WHERE user_id = ? AND idiom_id = ?",
+        (day.isoformat(), user_id, idiom_id),
+    )
 
 
 def get_idiom(conn, idiom_id: int) -> sqlite3.Row:
