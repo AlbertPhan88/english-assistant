@@ -408,16 +408,41 @@ def random_distractor_last_words(conn, exclude_id: int, n: int) -> list[str]:
 
 
 def boot_camp_idioms(conn, n: int, user_id: int) -> list[sqlite3.Row]:
-    """Follow-up boot camp idioms (phases 1 and 2) for a specific user."""
-    return list(conn.execute(
-        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                  r.correct, r.wrong, r.boot_phase, r.next_kind
-           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.boot_phase IN (1, 2)
-           ORDER BY r.boot_phase ASC, i.id ASC
-           LIMIT ?""",
-        (user_id, n),
-    ))
+    """Follow-up boot camp idioms split evenly between phase 1 (reverse)
+    and phase 2 (production), filling unused quota from the other phase."""
+    half = n // 2
+    cols = (
+        "i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, "
+        "r.correct, r.wrong, r.boot_phase, r.next_kind"
+    )
+
+    def _pick(phase: int, limit: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
+        if limit <= 0:
+            return []
+        if exclude_ids:
+            placeholders = ",".join("?" * len(exclude_ids))
+            return list(conn.execute(
+                f"""SELECT {cols} FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                    WHERE r.user_id = ? AND r.boot_phase = ?
+                    AND i.id NOT IN ({placeholders})
+                    ORDER BY i.id ASC LIMIT ?""",
+                (user_id, phase, *exclude_ids, limit),
+            ))
+        return list(conn.execute(
+            f"""SELECT {cols} FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                WHERE r.user_id = ? AND r.boot_phase = ?
+                ORDER BY i.id ASC LIMIT ?""",
+            (user_id, phase, limit),
+        ))
+
+    phase2 = _pick(2, half, [])
+    phase1 = _pick(1, n - len(phase2), [])
+    # Backfill any phase-2 shortfall with extra phase-1, and vice versa
+    remaining = n - len(phase1) - len(phase2)
+    if remaining > 0:
+        extra = _pick(2, remaining, [r["id"] for r in phase2])
+        phase2.extend(extra)
+    return phase2 + phase1
 
 
 def add_reask(conn, chat_id: int, idiom_id: int) -> None:
