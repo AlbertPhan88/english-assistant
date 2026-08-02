@@ -81,16 +81,29 @@ Output only the story, nothing else."""
 
 TRANSLATE_PROMPT = """Translate the following English story to Vietnamese.
 
-Idiom reference:
+Idiom reference (UNRELIABLE HINTS — see rules below):
 {idiom_map}
 
-Rules:
-- Write in natural, colloquial Vietnamese — like a Vietnamese author telling a funny story
-- When an English idiom is used as a VERB PHRASE (e.g. "he beat around the bush"), replace it with its Vietnamese equivalent from the reference above
-- When an English idiom is used as a NOUN or ADJECTIVE to describe someone/something (e.g. "Dave, the squeaky wheel"), translate its meaning naturally into Vietnamese (e.g. "Dave, tên hay kêu ca") — do NOT force a proverb into a noun slot
-- Translate meaning and feeling, not word-for-word
-- Keep the humor and absurdity of the original
-- Do not add notes or explanations
+CORE PRINCIPLE: The reader must understand every sentence. If using a hint would make the sentence ungrammatical, confusing, or shift the meaning — DROP THE HINT and paraphrase naturally in your own Vietnamese. A clear paraphrase always beats a forced "idiom".
+
+Treat each hint with suspicion. Use it ONLY if all four checks pass:
+1. GRAMMAR: it slots cleanly into the sentence with correct Vietnamese grammar.
+2. MEANING: it carries the same meaning as the English idiom in THIS context (not just a related vibe).
+3. AUTHENTICITY: it is a real Vietnamese expression — NOT a calque of another English idiom (e.g. "Bão tố trong cốc nước" is just "storm in a teacup" word-for-word; reject it).
+4. NATURALNESS: it reads like something a native Vietnamese speaker would actually say in this context.
+
+If ANY check fails → paraphrase the MEANING in natural Vietnamese instead. Examples of when to drop a hint:
+- "be frowned upon" hint = "Bị coi thường không" → broken grammar (trailing "không"); use "không được tán thành" or "bị ban quản lý phản đối".
+- "on record" hint = "có ghi trong sử sách" → wrong scale (sử sách = history books); use "đã chính thức tuyên bố" or "công khai cho biết".
+- "make a mountain out of a molehill" hint = "Bão tố trong cốc nước" → English calque; use "chuyện bé xé ra to" or "làm to chuyện".
+- "go figure" hint = "Có lạ không lạ" → not a real Vietnamese phrase; use "thật khó hiểu" or "ai mà ngờ được".
+
+Other rules:
+- Write in natural, colloquial Vietnamese — like a Vietnamese author telling a funny story to friends. A native speaker should feel it was written, not translated.
+- When an English idiom is a NOUN or ADJECTIVE describing someone/something (e.g. "Dave, the squeaky wheel"), translate its meaning naturally (e.g. "Dave, tên hay kêu ca") — do NOT cram a proverb into a noun slot.
+- Translate meaning and feeling, not word-for-word. Keep the humor and absurdity.
+- Avoid stiff calques (e.g. "Theo ý kiến khiêm tốn của tôi") — use the natural form (e.g. "Theo thiển ý của tôi").
+- Do not add notes or explanations.
 
 Story:
 {text}
@@ -98,13 +111,64 @@ Story:
 Output only the Vietnamese translation, nothing else."""
 
 
-REVIEW_VIET_PROMPT = """English idiom: "{phrase}" (meaning: {meaning})
+REVIEW_VIET_PROMPT = """You are auditing a Vietnamese idiom dictionary. The current entry may be excellent, mediocre, or broken. Your job: keep it if good, fix it if bad.
+
+English idiom: "{phrase}"
+Meaning: {meaning}
 Current Vietnamese: "{viet}"
 
-Task: if "{viet}" is already a real Vietnamese idiom, proverb (tục ngữ/thành ngữ), or folk saying → output it unchanged.
-If it is a naive literal translation or plain description → output a better Vietnamese idiom or proverb.
+Run all four checks on "{viet}". REJECT it if ANY check fails:
 
-Output: one short Vietnamese phrase only. No explanation. No sentence. No dash."""
+1. GRAMMAR — Is it a valid Vietnamese phrase? No dangling particles, no broken sentence fragments.
+   ✗ BAD: "Bị coi thường không" (trailing "không" makes it a question fragment)
+   ✗ BAD: "Có lạ không lạ" (not a real construction)
+
+2. MEANING — Does it match the English idiom's meaning IN GENERAL USAGE? Not just a poetically related image.
+   ✗ BAD: "take the plunge" → "Bước vào vành móng ngựa" (= step into courtroom dock — wrong meaning)
+   ✗ BAD: "on record" → "có ghi trong sử sách" (= recorded in history books — wrong scale; "on record" means officially stated, not historic)
+   ✗ BAD: "curl one's lip" → "Cau mày cau có" (= frowning brow — wrong body part)
+
+3. AUTHENTICITY — Is it a REAL Vietnamese expression, not a word-for-word translation of an English idiom (a "calque")?
+   ✗ BAD: "make a mountain out of a molehill" → "Bão tố trong cốc nước" (= calque of "storm in a teacup")
+   ✗ BAD: "in my humble opinion" → "Theo ý kiến khiêm tốn của tôi" (literal calque, stiff)
+   ✓ GOOD: "in my humble opinion" → "Theo thiển ý của tôi" (real Vietnamese form)
+
+4. NATURALNESS — Would a native Vietnamese speaker actually say this? Not an over-literal description or a clunky calque.
+
+If ALL four checks pass → output "{viet}" unchanged.
+If ANY check fails → output a better Vietnamese rendering, in this order of preference:
+  a) A real Vietnamese idiom/proverb/saying with the same meaning
+  b) A natural Vietnamese colloquial phrase that captures the meaning
+  c) A short plain Vietnamese phrase (only as last resort)
+
+OUTPUT FORMAT: exactly one short Vietnamese phrase on a single line. No quotes. No dash. No explanation. No "Vietnamese:" prefix."""
+
+
+EDITOR_PROMPT = """Bạn là một biên tập viên người Việt đang đọc lại bản dịch của một câu chuyện vui.
+
+Câu chuyện gốc tiếng Anh:
+{source}
+
+Bản dịch hiện tại (cần biên tập):
+{translation}
+
+Nhiệm vụ của bạn: đọc bản dịch như một độc giả người Việt thực sự, rồi viết lại để câu văn trôi chảy tự nhiên như do một nhà văn người Việt viết — không còn dấu vết của một bản dịch máy móc.
+
+Tập trung sửa các lỗi sau:
+1. CALQUE (dịch sát từng chữ từ tiếng Anh): nếu một cụm từ nghe như dịch máy thay vì cách nói thật của người Việt, viết lại bằng cụm tự nhiên. Ví dụ: "Giữ ai trong vòng tối tăm" → "giấu giếm ai" / "giữ kín không cho ai biết".
+2. NGỮ PHÁP GƯỢNG: câu cú lủng củng, lặp từ vô lý, hoặc đuôi câu cụt → viết lại trôi chảy.
+3. NGHĨA SAI: nếu một cụm bị dùng sai ngữ cảnh (ví dụ "bước vào vành móng ngựa" cho ý nghĩa "đánh liều") → thay bằng cách diễn đạt đúng nghĩa.
+4. GIỌNG VĂN: giữ giọng hài hước, châm biếm của bản gốc. Không trang trọng hóa, không thêm chú thích.
+
+Yêu cầu giữ nguyên:
+- Tiêu đề (#)
+- Tên nhân vật (Marcus, Diane, v.v.)
+- Tổng thể cốt truyện và các tình tiết
+- Các thành ngữ tiếng Việt thật sự tự nhiên đã có sẵn — đừng thay bằng cách diễn đạt khác
+
+Nếu bản dịch đã thực sự tự nhiên rồi, có thể giữ nguyên hoặc chỉ chỉnh sửa rất nhẹ.
+
+Chỉ xuất bản tiếng Việt đã biên tập, không kèm giải thích, không kèm nhãn "Bản đã sửa:" hay tương tự."""
 
 
 def _parse_response(text: str) -> tuple[str, str]:
@@ -168,6 +232,7 @@ def translate_to_vietnamese(
     client: Anthropic,
     idioms: list[dict] | None = None,
     model: str = "claude-sonnet-4-6",
+    edit: bool = True,
 ) -> str:
     if idioms:
         idiom_map = "\n".join(
@@ -181,7 +246,26 @@ def translate_to_vietnamese(
         max_tokens=800,
         messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text, idiom_map=idiom_map)}],
     )
-    return resp.content[0].text.strip() if resp.content else ""
+    translation = resp.content[0].text.strip() if resp.content else ""
+    if edit and translation:
+        translation = edit_vietnamese_story(text, translation, client, model=model)
+    return translation
+
+
+def edit_vietnamese_story(
+    source: str,
+    translation: str,
+    client: Anthropic,
+    model: str = "claude-sonnet-4-6",
+) -> str:
+    """Second-pass editor: smooth out calques and awkward phrasing in a Vietnamese translation."""
+    resp = client.messages.create(
+        model=model,
+        max_tokens=900,
+        messages=[{"role": "user", "content": EDITOR_PROMPT.format(source=source, translation=translation)}],
+    )
+    edited = resp.content[0].text.strip() if resp.content else ""
+    return edited or translation
 
 
 def generate_daily_story(idioms: list[dict], client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:

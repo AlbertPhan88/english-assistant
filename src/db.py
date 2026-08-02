@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     next_example_idx INTEGER NOT NULL DEFAULT 0,
     next_story_idx   INTEGER NOT NULL DEFAULT 0,
     last_iotd_at     TEXT,
+    skipped          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, idiom_id)
 );
 
@@ -188,6 +189,40 @@ def _migrate(conn) -> None:
     rev_cols2 = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
     if "last_iotd_at" not in rev_cols2:
         conn.execute("ALTER TABLE reviews ADD COLUMN last_iotd_at TEXT")
+    if "skipped" not in rev_cols2:
+        conn.execute("ALTER TABLE reviews ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+
+    # Persistent production-question cache so user replies always find the target idiom.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS production_cache (
+            chat_id    INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            idiom_id   INTEGER NOT NULL,
+            phrase     TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            turn_number     INTEGER NOT NULL DEFAULT 1,
+            used_situations TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (chat_id, message_id)
+        )"""
+    )
+    pc_cols = {row[1] for row in conn.execute("PRAGMA table_info(production_cache)")}
+    if "turn_number" not in pc_cols:
+        conn.execute("ALTER TABLE production_cache ADD COLUMN turn_number INTEGER NOT NULL DEFAULT 1")
+    if "used_situations" not in pc_cols:
+        conn.execute("ALTER TABLE production_cache ADD COLUMN used_situations TEXT NOT NULL DEFAULT ''")
+    # Per-day log of sent questions so evening quiz can avoid morning duplicates.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS question_sent (
+            chat_id    INTEGER NOT NULL,
+            idiom_id   INTEGER NOT NULL,
+            sent_date  TEXT NOT NULL,
+            PRIMARY KEY (chat_id, idiom_id, sent_date)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_question_sent_chat_date "
+        "ON question_sent(chat_id, sent_date)"
+    )
 
     # Add missing columns to idioms
     cols = {row[1] for row in conn.execute("PRAGMA table_info(idioms)")}
@@ -407,10 +442,12 @@ def random_distractor_last_words(conn, exclude_id: int, n: int) -> list[str]:
     return result
 
 
-def boot_camp_idioms(conn, n: int, user_id: int) -> list[sqlite3.Row]:
+def boot_camp_idioms(conn, n: int, user_id: int,
+                     exclude_ids: list[int] | None = None) -> list[sqlite3.Row]:
     """Follow-up boot camp idioms split evenly between phase 1 (reverse)
     and phase 2 (production), filling unused quota from the other phase."""
     half = n // 2
+    seed_excludes = list(exclude_ids or [])
     cols = (
         "i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, "
         "r.correct, r.wrong, r.boot_phase, r.next_kind"
@@ -423,24 +460,24 @@ def boot_camp_idioms(conn, n: int, user_id: int) -> list[sqlite3.Row]:
             placeholders = ",".join("?" * len(exclude_ids))
             return list(conn.execute(
                 f"""SELECT {cols} FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                    WHERE r.user_id = ? AND r.boot_phase = ?
+                    WHERE r.user_id = ? AND r.boot_phase = ? AND r.skipped = 0
                     AND i.id NOT IN ({placeholders})
                     ORDER BY i.id ASC LIMIT ?""",
                 (user_id, phase, *exclude_ids, limit),
             ))
         return list(conn.execute(
             f"""SELECT {cols} FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.user_id = ? AND r.boot_phase = ?
+                WHERE r.user_id = ? AND r.boot_phase = ? AND r.skipped = 0
                 ORDER BY i.id ASC LIMIT ?""",
             (user_id, phase, limit),
         ))
 
-    phase2 = _pick(2, half, [])
-    phase1 = _pick(1, n - len(phase2), [])
+    phase2 = _pick(2, half, seed_excludes)
+    phase1 = _pick(1, n - len(phase2), seed_excludes + [r["id"] for r in phase2])
     # Backfill any phase-2 shortfall with extra phase-1, and vice versa
     remaining = n - len(phase1) - len(phase2)
     if remaining > 0:
-        extra = _pick(2, remaining, [r["id"] for r in phase2])
+        extra = _pick(2, remaining, seed_excludes + [r["id"] for r in phase2])
         phase2.extend(extra)
     return phase2 + phase1
 
@@ -453,13 +490,23 @@ def add_reask(conn, chat_id: int, idiom_id: int) -> None:
 
 
 def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
+    """Pop up to n re-ask entries, deduped by idiom_id. All queued entries for
+    each popped idiom are removed (multiple wrong attempts collapse to one re-ask).
+    """
     rows = list(conn.execute(
-        "SELECT id, idiom_id FROM reask_queue WHERE chat_id = ? ORDER BY added_at ASC LIMIT ?",
+        """SELECT MIN(id) AS id, idiom_id, MIN(added_at) AS added_at
+           FROM reask_queue WHERE chat_id = ?
+           GROUP BY idiom_id
+           ORDER BY added_at ASC LIMIT ?""",
         (chat_id, n),
     ))
     if rows:
-        ids = [r["id"] for r in rows]
-        conn.execute(f"DELETE FROM reask_queue WHERE id IN ({','.join('?'*len(ids))})", ids)
+        idiom_ids = [r["idiom_id"] for r in rows]
+        placeholders = ",".join("?" * len(idiom_ids))
+        conn.execute(
+            f"DELETE FROM reask_queue WHERE chat_id = ? AND idiom_id IN ({placeholders})",
+            (chat_id, *idiom_ids),
+        )
     return rows
 
 
@@ -515,6 +562,7 @@ def weakest_idiom(conn, user_id: int) -> sqlite3.Row | None:
     base = """
         SELECT i.* FROM idioms i JOIN reviews r ON i.id = r.idiom_id
         WHERE r.user_id = ?
+          AND r.skipped = 0
           AND (r.last_iotd_at IS NULL OR r.last_iotd_at < date('now', '-7 days'))
           AND (r.correct + r.wrong) > 0
           {extra}
@@ -542,6 +590,82 @@ def mark_idiom_of_the_day(conn, user_id: int, idiom_id: int, day: date) -> None:
     )
 
 
+def mark_skipped(conn, user_id: int, idiom_id: int) -> bool:
+    """Mark an idiom as known/skipped for a user. Returns True if a row was updated."""
+    cur = conn.execute(
+        "UPDATE reviews SET skipped = 1 WHERE user_id = ? AND idiom_id = ?",
+        (user_id, idiom_id),
+    )
+    return cur.rowcount > 0
+
+
+def unmark_skipped(conn, user_id: int, idiom_id: int) -> bool:
+    """Clear the skipped flag. Returns True if a row was updated."""
+    cur = conn.execute(
+        "UPDATE reviews SET skipped = 0 WHERE user_id = ? AND idiom_id = ?",
+        (user_id, idiom_id),
+    )
+    return cur.rowcount > 0
+
+
+def list_skipped(conn, user_id: int) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        """SELECT i.id, i.phrase, i.vietnamese_equiv
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE r.user_id = ? AND r.skipped = 1
+           ORDER BY i.phrase""",
+        (user_id,),
+    ))
+
+
+def find_idiom_by_phrase(conn, phrase: str) -> sqlite3.Row | None:
+    """Case-insensitive exact-phrase lookup."""
+    return conn.execute(
+        "SELECT * FROM idioms WHERE LOWER(phrase) = LOWER(?)", (phrase.strip(),)
+    ).fetchone()
+
+
+def save_production_pending(conn, chat_id: int, message_id: int, idiom_id: int, phrase: str,
+                            turn_number: int = 1, used_situations: str = "") -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO production_cache(
+             chat_id, message_id, idiom_id, phrase, turn_number, used_situations
+           ) VALUES (?, ?, ?, ?, ?, ?)""",
+        (chat_id, message_id, idiom_id, phrase, turn_number, used_situations),
+    )
+
+
+def get_production_pending(conn, chat_id: int, message_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT idiom_id, phrase, turn_number, used_situations FROM production_cache "
+        "WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    ).fetchone()
+
+
+def clear_production_pending(conn, chat_id: int, message_id: int) -> None:
+    conn.execute(
+        "DELETE FROM production_cache WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    )
+
+
+def log_question_sent(conn, chat_id: int, idiom_id: int, sent_date: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO question_sent(chat_id, idiom_id, sent_date) VALUES (?, ?, ?)",
+        (chat_id, idiom_id, sent_date),
+    )
+
+
+def get_sent_today(conn, chat_id: int, day: str) -> list[int]:
+    return [
+        r[0] for r in conn.execute(
+            "SELECT idiom_id FROM question_sent WHERE chat_id = ? AND sent_date = ?",
+            (chat_id, day),
+        )
+    ]
+
+
 def get_idiom(conn, idiom_id: int) -> sqlite3.Row:
     return conn.execute("SELECT * FROM idioms WHERE id = ?", (idiom_id,)).fetchone()
 
@@ -551,7 +675,7 @@ def due_idioms(conn, today: date, limit: int, user_id: int) -> list[sqlite3.Row]
     rows = list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.due_date <= ?
+           WHERE r.user_id = ? AND r.due_date <= ? AND r.skipped = 0
            ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
            LIMIT ?""",
         (user_id, today_str, limit),
@@ -562,7 +686,7 @@ def due_idioms(conn, today: date, limit: int, user_id: int) -> list[sqlite3.Row]
         extra = list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, r.correct, r.wrong
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.user_id = ? AND i.id NOT IN ({placeholders}) AND r.due_date > ?
+                WHERE r.user_id = ? AND i.id NOT IN ({placeholders}) AND r.due_date > ? AND r.skipped = 0
                 ORDER BY r.last_seen ASC NULLS FIRST
                 LIMIT ?""",
             (user_id, *existing_ids, today_str, limit - len(rows)),
@@ -589,7 +713,9 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
     if 0 <= boot_phase <= 2:
         from datetime import timedelta
         new_phase = boot_phase + 1
-        due = (date.today() + timedelta(days=1)).isoformat()
+        # No same-day delay during boot — let one quiz session advance phase
+        # 0 → 1 → 2 → 3 within the same day. SM-2 takes over once graduated.
+        due = date.today().isoformat()
         if new_phase == 3:
             conn.execute(
                 """UPDATE reviews SET boot_phase=3, interval=1, repetitions=1, due_date=?,
@@ -656,7 +782,7 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[s
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                        r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ?
+                WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
                 ORDER BY r.last_seen DESC
                 LIMIT ?""",
@@ -666,7 +792,7 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[s
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                   r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ?
+           WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ? AND r.skipped = 0
            ORDER BY r.last_seen DESC
            LIMIT ?""",
         (user_id, cutoff, n),
@@ -681,7 +807,7 @@ def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int], user
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                        r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ?
+                WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
                 ORDER BY i.id ASC
                 LIMIT ?""",
@@ -691,10 +817,82 @@ def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int], user
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                   r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ?
+           WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ? AND r.skipped = 0
            ORDER BY i.id ASC
            LIMIT ?""",
         (user_id, theme, n),
+    ))
+
+
+def never_in_story_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[sqlite3.Row]:
+    """Phase-0 idioms that have NEVER appeared in any daily story. Used to seed
+    fresh material into the daily story so the introduction pipeline keeps flowing.
+    Prefers idioms with a Vietnamese translation so the story bullet list is useful."""
+    story_id_set: set[int] = set()
+    for row in conn.execute("SELECT idiom_ids FROM daily_stories WHERE idiom_ids != ''"):
+        for tok in row[0].split(","):
+            tok = tok.strip()
+            if tok:
+                try:
+                    story_id_set.add(int(tok))
+                except ValueError:
+                    pass
+    excluded = set(exclude_ids) | story_id_set
+    ex_placeholders = ",".join("?" * len(excluded)) if excluded else "NULL"
+    return list(conn.execute(
+        f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                   r.correct, r.wrong, r.boot_phase, r.next_kind
+            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+            WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
+            AND i.id NOT IN ({ex_placeholders})
+            AND i.vietnamese_equiv IS NOT NULL AND i.vietnamese_equiv != '' AND i.vietnamese_equiv != '—'
+            ORDER BY RANDOM()
+            LIMIT ?""",
+        (user_id, *excluded, n),
+    ))
+
+
+def story_introduced_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[sqlite3.Row]:
+    """Phase-0 idioms that appeared in ANY daily story — so the user has been
+    exposed to the phrase + Vietnamese at least once. Even months-old exposure
+    counts: re-encountering an old story idiom is a recall opportunity.
+    These feed back into the boot pipeline as forward (MC) quizzes."""
+    # Collect distinct idiom_ids from daily_stories.idiom_ids (comma-separated)
+    story_id_set: set[int] = set()
+    for row in conn.execute("SELECT idiom_ids FROM daily_stories WHERE idiom_ids != ''"):
+        for tok in row[0].split(","):
+            tok = tok.strip()
+            if tok:
+                try:
+                    story_id_set.add(int(tok))
+                except ValueError:
+                    pass
+    if not story_id_set:
+        return []
+    story_ids = sorted(story_id_set)
+    story_placeholders = ",".join("?" * len(story_ids))
+    if exclude_ids:
+        ex_placeholders = ",".join("?" * len(exclude_ids))
+        return list(conn.execute(
+            f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                       r.correct, r.wrong, r.boot_phase, r.next_kind
+                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+                WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
+                AND i.id IN ({story_placeholders})
+                AND i.id NOT IN ({ex_placeholders})
+                ORDER BY RANDOM()
+                LIMIT ?""",
+            (user_id, *story_ids, *exclude_ids, n),
+        ))
+    return list(conn.execute(
+        f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                   r.correct, r.wrong, r.boot_phase, r.next_kind
+            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+            WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
+            AND i.id IN ({story_placeholders})
+            ORDER BY RANDOM()
+            LIMIT ?""",
+        (user_id, *story_ids, n),
     ))
 
 
@@ -703,7 +901,7 @@ def advance_theme_if_exhausted(conn, user_id: int) -> None:
     current = get_setting(conn, "current_theme", THEME_ORDER[0], user_id=user_id)
     unseen_count = conn.execute(
         "SELECT COUNT(*) FROM idioms i JOIN reviews r ON i.id = r.idiom_id "
-        "WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ?",
+        "WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ? AND r.skipped = 0",
         (user_id, current),
     ).fetchone()[0]
     if unseen_count > 0:
@@ -724,12 +922,24 @@ def advance_theme_if_exhausted(conn, user_id: int) -> None:
             return
 
 
-def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0) -> list[sqlite3.Row]:
-    """Build a clustered daily set for a specific user."""
+def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
+                     extra_exclude_ids: list[int] | None = None) -> list[sqlite3.Row]:
+    """Build a clustered daily set for a specific user.
+
+    `extra_exclude_ids` (optional): idiom ids to skip on top of the internal
+    bucket exclusions. Used by the evening quiz to avoid idioms already
+    exercised in the morning session.
+    """
     today_str = today.isoformat()
+    seed_excludes = list(extra_exclude_ids or [])
+
+    # Bucket sizes: sized to intake ~5 fresh/day and ~19 items due/day.
+    # boot 6 = 5 intake + 20% miss buffer (3 phase-1 + 3 phase-2)
+    # review 8 = absorb graduated pool's actual due-today volume
+    # shortfall shrinks accordingly.
 
     # Bucket 1: boot camp follow-ups (phases 1 and 2)
-    boot_rows = boot_camp_idioms(conn, 4, user_id)
+    boot_rows = boot_camp_idioms(conn, 6, user_id, exclude_ids=seed_excludes)
     boot_ids = [r["id"] for r in boot_rows]
 
     # Bucket 2: warm-up — recent wrong, not seen in 7+ days
@@ -738,19 +948,19 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0) -> li
     ).fetchone()[0] or 0
     warmup: list[sqlite3.Row] = []
     if total_wrong >= 3:
-        warmup = warm_up_idioms(conn, 3, boot_ids, user_id)
+        warmup = warm_up_idioms(conn, 3, boot_ids + seed_excludes, user_id)
     warmup_ids = [r["id"] for r in warmup]
 
     # Bucket 3: SM-2 review — due today, graduated idioms only
-    exclude_ids = boot_ids + warmup_ids
-    review_target = 4
+    exclude_ids = boot_ids + warmup_ids + seed_excludes
+    review_target = 8
     if exclude_ids:
         placeholders = ",".join("?" * len(exclude_ids))
         review = list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                        r.correct, r.wrong, r.boot_phase, r.next_kind
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ?
+                WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
                 ORDER BY r.due_date ASC, r.ease ASC
                 LIMIT ?""",
@@ -761,18 +971,18 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0) -> li
             """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                       r.correct, r.wrong, r.boot_phase, r.next_kind
                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-               WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ?
+               WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ? AND r.skipped = 0
                ORDER BY r.due_date ASC, r.ease ASC
                LIMIT ?""",
             (user_id, today_str, review_target),
         ))
     review_ids = [r["id"] for r in review]
 
-    # Bucket 4: new from current theme
-    exclude_ids = boot_ids + warmup_ids + review_ids
-    advance_theme_if_exhausted(conn, user_id)
-    current_theme = get_setting(conn, "current_theme", THEME_ORDER[0], user_id=user_id)
-    new_rows = new_idioms_from_theme(conn, current_theme, 4, exclude_ids, user_id)
+    # Bucket 4: story-introduced phase-0 idioms. Only includes idioms the user
+    # has already seen in a daily story (so the phrase + Vietnamese was shown).
+    # Refills the boot pipeline so production questions keep flowing.
+    exclude_ids = boot_ids + warmup_ids + review_ids + seed_excludes
+    new_rows = story_introduced_idioms(conn, 5, exclude_ids, user_id)
 
     all_rows = boot_rows + warmup + review + new_rows
     obtained = len(all_rows)
@@ -780,14 +990,15 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0) -> li
     # Fill shortfall from any remaining idioms
     if obtained < total:
         shortfall = total - obtained
-        all_ids = [r["id"] for r in all_rows]
+        all_ids = list({*(r["id"] for r in all_rows), *seed_excludes})
         if all_ids:
             placeholders = ",".join("?" * len(all_ids))
             extra = list(conn.execute(
                 f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                            r.correct, r.wrong, r.boot_phase, r.next_kind
                     FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                    WHERE r.user_id = ? AND i.id NOT IN ({placeholders})
+                    WHERE r.user_id = ? AND r.skipped = 0 AND r.boot_phase > 0
+                    AND i.id NOT IN ({placeholders})
                     ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
                     LIMIT ?""",
                 (user_id, *all_ids, shortfall),
@@ -797,7 +1008,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0) -> li
                 """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                           r.correct, r.wrong, r.boot_phase, r.next_kind
                    FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-                   WHERE r.user_id = ?
+                   WHERE r.user_id = ? AND r.skipped = 0 AND r.boot_phase > 0
                    ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
                    LIMIT ?""",
                 (user_id, shortfall),
@@ -817,7 +1028,7 @@ def weak_idioms_this_week(conn, n: int, user_id: int) -> list[sqlite3.Row]:
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                   r.correct, r.wrong, r.boot_phase, r.next_kind
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
-           WHERE r.user_id = ? AND r.last_seen >= ?
+           WHERE r.user_id = ? AND r.last_seen >= ? AND r.skipped = 0
            ORDER BY CAST(r.wrong AS REAL) / (r.correct + r.wrong + 1) DESC
            LIMIT ?""",
         (user_id, cutoff, n),

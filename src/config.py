@@ -17,6 +17,10 @@ def _require(key: str) -> str:
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 DAILY_HOUR: int = int(os.getenv("DAILY_HOUR", "6"))
-DAILY_IDIOM_COUNT: int = int(os.getenv("DAILY_IDIOM_COUNT", "15"))
+EVENING_HOUR: int = int(os.getenv("EVENING_HOUR", "19"))
+DAILY_IDIOM_COUNT: int = int(os.getenv("DAILY_IDIOM_COUNT", "30"))
+EVENING_IDIOM_COUNT: int = int(os.getenv("EVENING_IDIOM_COUNT", "15"))
+# Daily story uses a smaller idiom count — Telegram messages are capped at 4096 chars.
+STORY_IDIOM_COUNT: int = int(os.getenv("STORY_IDIOM_COUNT", "15"))
 DB_PATH: str = os.getenv("DB_PATH", "data/idioms.db")
 TZ: ZoneInfo = ZoneInfo(os.getenv("TZ", "Asia/Ho_Chi_Minh"))

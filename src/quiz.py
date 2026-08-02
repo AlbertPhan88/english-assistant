@@ -16,6 +16,7 @@ class Question:
     kind: str = "forward"   # "forward" | "reverse" | "vietnamese" | "completion" | "production"
     phrase: str = ""        # shown in reverse/vietnamese question header
     reask: bool = False     # True if this is a re-ask of a previously missed idiom
+    situation: str = ""     # For production questions: the situation used (for multi-turn drills)
 
 
 _PLACEHOLDER = re.compile(
@@ -268,6 +269,7 @@ def build_completion_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
+# Static fallback situations — used if the LLM call fails.
 _SITUATIONS = [
     "chatting with a friend",
     "at work discussing a problem",
@@ -279,10 +281,53 @@ _SITUATIONS = [
 ]
 
 
-def build_production_question(conn, idiom_row: sqlite3.Row) -> Question:
+SITUATION_PROMPT = """Invent ONE concrete, specific situation for a learner to use the English idiom "{phrase}" (meaning: {meaning}).
+
+Rules:
+- 1-2 sentences, under 35 words.
+- Include specific details: named people, concrete objects, real stakes. NOT vague like "at work" or "with a friend".
+- The situation should make the idiom feel natural to reach for — but do NOT include or hint at the idiom text itself in the situation.
+- {avoid_clause}
+
+Output only the situation text on a single line. No quotes, no headers, no "Situation:" prefix."""
+
+
+def _generate_situation(phrase: str, meaning: str, avoid: list[str]) -> str:
+    """Ask Claude for one concrete scenario. Falls back to a static one on failure."""
+    try:
+        from anthropic import Anthropic
+        from . import config
+        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        avoid_clause = (
+            "Do NOT repeat these already-used scenarios: " + " || ".join(avoid) + "."
+        ) if avoid else "Come up with something fresh."
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=90,
+            messages=[{"role": "user", "content": SITUATION_PROMPT.format(
+                phrase=phrase, meaning=meaning, avoid_clause=avoid_clause,
+            )}],
+        )
+        text = resp.content[0].text.strip() if resp.content else ""
+        # Take first non-empty line, strip quotes/prefix
+        for line in text.splitlines():
+            line = line.strip().strip('"').strip("'").strip()
+            for prefix in ("Situation:", "Scenario:"):
+                if line.lower().startswith(prefix.lower()):
+                    line = line[len(prefix):].strip()
+            if line and len(line) < 250:
+                return line
+    except Exception:
+        pass
+    # Fallback: pick a static situation that isn't in `avoid`
+    remaining = [s for s in _SITUATIONS if s not in avoid]
+    return random.choice(remaining or _SITUATIONS)
+
+
+def build_production_question(conn, idiom_row: sqlite3.Row, avoid_situations: list[str] | None = None) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
-    situation = random.choice(_SITUATIONS)
+    situation = _generate_situation(phrase, meaning, avoid_situations or [])
     viet = idiom_row["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
     stem = (
@@ -297,6 +342,7 @@ def build_production_question(conn, idiom_row: sqlite3.Row) -> Question:
         correct_index=-1,
         kind="production",
         phrase=phrase,
+        situation=situation,
     )
 
 
