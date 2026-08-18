@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 
@@ -705,7 +705,8 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
     if not row:
         return
 
-    now = datetime.utcnow().isoformat()
+    from . import config
+    now = config.now_local().isoformat()
     correct_delta = 1 if quality >= 3 else 0
     wrong_delta = 0 if quality >= 3 else 1
     boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
@@ -715,7 +716,7 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
         new_phase = boot_phase + 1
         # No same-day delay during boot — let one quiz session advance phase
         # 0 → 1 → 2 → 3 within the same day. SM-2 takes over once graduated.
-        due = date.today().isoformat()
+        due = config.today_local().isoformat()
         if new_phase == 3:
             conn.execute(
                 """UPDATE reviews SET boot_phase=3, interval=1, repetitions=1, due_date=?,
@@ -732,7 +733,7 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
     else:
         from datetime import timedelta
         ease, interval, reps = sm2(row["ease"], row["interval"], row["repetitions"], quality)
-        due = (date.today() + timedelta(days=interval)).isoformat()
+        due = (config.today_local() + timedelta(days=interval)).isoformat()
         next_kind = ((row["next_kind"] or 0) + 1) % 5
         conn.execute(
             """UPDATE reviews SET ease=?, interval=?, repetitions=?, due_date=?, last_seen=?,
@@ -775,7 +776,8 @@ def set_setting(conn, key: str, value: str, user_id: int = 0) -> None:
 def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[sqlite3.Row]:
     """Idioms with wrong > 0 AND last_seen >= 7 days ago for a specific user."""
     from datetime import timedelta
-    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    from . import config
+    cutoff = (config.today_local() - timedelta(days=7)).isoformat()
     if exclude_ids:
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
@@ -1023,7 +1025,8 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
 def weak_idioms_this_week(conn, n: int, user_id: int) -> list[sqlite3.Row]:
     """Idioms reviewed in the past 7 days, ordered by error rate, for a specific user."""
     from datetime import timedelta
-    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    from . import config
+    cutoff = (config.today_local() - timedelta(days=7)).isoformat()
     return list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                   r.correct, r.wrong, r.boot_phase, r.next_kind

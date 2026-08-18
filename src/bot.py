@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime
+from datetime import timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -84,7 +84,7 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
     # Log every sent question by (chat_id, idiom_id, date) so evening quiz
     # can exclude morning items even if the user hasn't answered them yet.
     with db.connect(config.DB_PATH) as conn:
-        db.log_question_sent(conn, chat_id, q.idiom_id, date.today().isoformat())
+        db.log_question_sent(conn, chat_id, q.idiom_id, config.today_local().isoformat())
         if q.kind == "production":
             db.save_production_pending(
                 conn, chat_id, msg.message_id, q.idiom_id, q.phrase,
@@ -142,7 +142,7 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         remaining = n - len(reask_questions)
         if remaining > 0:
-            rows = db.build_daily_rows(conn, date.today(), remaining + 5, chat_id)
+            rows = db.build_daily_rows(conn, config.today_local(), remaining + 5, chat_id)
             candidates = build_questions_from_rows(conn, rows, chat_id)
             new_questions = []
             for q in candidates:
@@ -199,7 +199,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    today = date.today().isoformat()
+    today = config.today_local().isoformat()
     with db.connect(config.DB_PATH) as conn:
         row = db.get_daily_story(conn, today)
 
@@ -226,7 +226,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             story_idioms = db.get_idioms_by_ids(conn, idiom_ids_str) if idiom_ids_str else []
     else:
         with db.connect(config.DB_PATH) as conn:
-            rows = db.due_idioms(conn, date.today(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
+            rows = db.due_idioms(conn, config.today_local(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
             story_idioms = [
                 {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
                 for r in rows
@@ -400,7 +400,7 @@ async def send_daily_quiz(application: Application) -> None:
     from .examples import generate_daily_story, translate_to_vietnamese
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    today = date.today()
+    today = config.today_local()
 
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
@@ -445,7 +445,6 @@ async def send_daily_quiz(application: Application) -> None:
         logger.error("Failed to generate daily story: %s", e)
 
     # Look up what was sent in the last 2 days for each user to avoid same-set repeats
-    from datetime import timedelta
     recent_cutoff = (today - timedelta(days=2)).isoformat()
 
     for chat_id in users:
@@ -538,7 +537,7 @@ def _split_for_telegram(text: str, limit: int = 3900) -> list[str]:
 
 async def send_evening_quiz(application: Application) -> None:
     """Lighter evening session: pure quiz, no story, no IoTD. Used for spaced repetition."""
-    today = date.today()
+    today = config.today_local()
     with db.connect(config.DB_PATH) as conn:
         users = db.all_users(conn)
     if not users:

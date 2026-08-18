@@ -2,7 +2,6 @@ import random
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date
 
 from . import db
 
@@ -435,6 +434,7 @@ def build_questions_from_rows(conn, rows: list, user_id: int = 0) -> list[Questi
 
 
 def build_daily_set(conn, n: int, user_id: int = 0) -> list[Question]:
-    today = date.today()
+    from . import config
+    today = config.today_local()
     rows = db.build_daily_rows(conn, today, n, user_id)
     return build_questions_from_rows(conn, rows, user_id)
