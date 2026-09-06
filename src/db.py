@@ -695,6 +695,11 @@ def due_idioms(conn, today: date, limit: int, user_id: int) -> list[sqlite3.Row]
     return rows
 
 
+# Index into quiz._KIND_BUILDERS for a production question. Slots 1 and 3 of the
+# SM-2 rotation are both production; 1 is the earlier of the two.
+PRODUCTION_KIND = 1
+
+
 def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
     from .scheduler import sm2
     row = conn.execute(
@@ -717,7 +722,25 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
         # No same-day delay during boot — let one quiz session advance phase
         # 0 → 1 → 2 → 3 within the same day. SM-2 takes over once graduated.
         due = config.today_local().isoformat()
-        if new_phase == 3:
+        if new_phase == 3 and quality < 3:
+            # Missed the production stage. Graduate anyway, but hand SM-2 the
+            # miss so the ease drops, and queue the retry as another production
+            # question a day out. Repeating it later the same day would only
+            # test working memory; rotating on to a multiple-choice question
+            # would never re-test producing the phrase at all.
+            ease, interval, reps = sm2(
+                row["ease"], row["interval"], row["repetitions"], quality
+            )
+            retry_due = (config.today_local() + timedelta(days=interval)).isoformat()
+            conn.execute(
+                """UPDATE reviews SET boot_phase=3, ease=?, interval=?, repetitions=?,
+                   due_date=?, last_seen=?, correct=correct+?, wrong=wrong+?,
+                   next_kind=?
+                   WHERE user_id=? AND idiom_id=?""",
+                (ease, interval, reps, retry_due, now, correct_delta, wrong_delta,
+                 PRODUCTION_KIND, user_id, idiom_id),
+            )
+        elif new_phase == 3:
             conn.execute(
                 """UPDATE reviews SET boot_phase=3, interval=1, repetitions=1, due_date=?,
                    last_seen=?, correct=correct+?, wrong=wrong+?
@@ -734,7 +757,10 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
         from datetime import timedelta
         ease, interval, reps = sm2(row["ease"], row["interval"], row["repetitions"], quality)
         due = (config.today_local() + timedelta(days=interval)).isoformat()
-        next_kind = ((row["next_kind"] or 0) + 1) % 5
+        # A miss holds the question type instead of rotating on: you retry the
+        # skill you just failed, spaced by whatever interval SM-2 hands back.
+        current_kind = (row["next_kind"] or 0) % 5
+        next_kind = current_kind if quality < 3 else (current_kind + 1) % 5
         conn.execute(
             """UPDATE reviews SET ease=?, interval=?, repetitions=?, due_date=?, last_seen=?,
                correct=correct+?, wrong=wrong+?, next_kind=?
