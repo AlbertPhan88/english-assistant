@@ -670,6 +670,21 @@ def get_idiom(conn, idiom_id: int) -> sqlite3.Row:
     return conn.execute("SELECT * FROM idioms WHERE id = ?", (idiom_id,)).fetchone()
 
 
+def get_review_row(conn, idiom_id: int, user_id: int) -> sqlite3.Row | None:
+    """One idiom joined to its review state, shaped like the daily-set rows.
+
+    Question builders dispatch on boot_phase and next_kind, so a caller holding
+    only an idiom id needs this to rebuild the question type the idiom is due for.
+    """
+    return conn.execute(
+        """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
+                  r.correct, r.wrong, r.boot_phase, r.next_kind
+           FROM idioms i JOIN reviews r ON i.id = r.idiom_id
+           WHERE i.id = ? AND r.user_id = ?""",
+        (idiom_id, user_id),
+    ).fetchone()
+
+
 def due_idioms(conn, today: date, limit: int, user_id: int) -> list[sqlite3.Row]:
     today_str = today.isoformat()
     rows = list(conn.execute(

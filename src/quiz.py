@@ -398,11 +398,11 @@ _KIND_BUILDERS = [
     [build_completion_question, build_question, build_reverse_question],
 ]
 
-# Boot phase 0→forward, phase 1→reverse; phase 2 handled specially in _build_one
+# Boot phase 0→forward, phase 1→reverse; phase 2 handled specially in build_one
 _BOOT_KIND = [0, 2]
 
 
-def _build_one(conn, row, user_id: int = 0) -> Question:
+def build_one(conn, row, user_id: int = 0) -> Question:
     """Dispatch to the right question builder based on boot_phase or next_kind."""
     boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
     if 0 <= boot_phase <= 2:
@@ -427,7 +427,7 @@ def build_questions_from_rows(conn, rows: list, user_id: int = 0) -> list[Questi
     questions = []
     for row in rows:
         try:
-            questions.append(_build_one(conn, row, user_id))
+            questions.append(build_one(conn, row, user_id))
         except ValueError:
             continue
     return questions

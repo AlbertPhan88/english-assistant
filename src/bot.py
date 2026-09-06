@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 from . import config, db
-from .quiz import Question, build_daily_set, build_question, build_question_from_story, build_questions_from_rows, build_reverse_question
+from .quiz import Question, build_daily_set, build_one, build_question_from_story, build_questions_from_rows
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,29 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
+    """Pop up to `cap` missed idioms and rebuild each as the question type it is
+    now due for.
+
+    A miss holds the idiom on the modality it was missed on, so dispatching
+    through build_one re-tests the skill that actually failed. Rebuilding every
+    re-ask as a forward multiple-choice, as this used to, let a failed
+    production question come back as a four-option pick.
+    """
+    questions: list[Question] = []
+    for r in db.pop_reasks(conn, chat_id, cap):
+        row = db.get_review_row(conn, r["idiom_id"], chat_id)
+        if row is None:
+            continue
+        try:
+            q = build_one(conn, row, chat_id)
+        except ValueError:
+            continue
+        q.reask = True
+        questions.append(q)
+    return questions
+
+
 async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     n = 5
@@ -120,38 +143,16 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with db.connect(config.DB_PATH) as conn:
         # Prepend any pending re-asks — cap at n//3 so production/new questions
         # aren't starved when the re-ask queue is deep.
-        reask_cap = max(1, n // 3)
-        reask_rows = db.pop_reasks(conn, chat_id, reask_cap)
-        reask_questions = []
-        seen_ids: set[int] = set()
-        for r in reask_rows:
-            if r["idiom_id"] in seen_ids:
-                continue
-            idiom = db.get_idiom(conn, r["idiom_id"])
-            if idiom:
-                try:
-                    q = build_question(conn, idiom, chat_id)
-                except ValueError:
-                    try:
-                        q = build_reverse_question(conn, idiom, chat_id)
-                    except ValueError:
-                        continue
-                q.reask = True
-                reask_questions.append(q)
-                seen_ids.add(r["idiom_id"])
+        reask_questions = _build_reask_questions(conn, chat_id, max(1, n // 3))
+        reask_ids = [q.idiom_id for q in reask_questions]
 
         remaining = n - len(reask_questions)
         if remaining > 0:
-            rows = db.build_daily_rows(conn, config.today_local(), remaining + 5, chat_id)
-            candidates = build_questions_from_rows(conn, rows, chat_id)
-            new_questions = []
-            for q in candidates:
-                if q.idiom_id in seen_ids:
-                    continue
-                new_questions.append(q)
-                seen_ids.add(q.idiom_id)
-                if len(new_questions) >= remaining:
-                    break
+            rows = db.build_daily_rows(
+                conn, config.today_local(), remaining + 5, chat_id,
+                extra_exclude_ids=reask_ids,
+            )
+            new_questions = build_questions_from_rows(conn, rows, chat_id)[:remaining]
         else:
             new_questions = []
 
@@ -461,11 +462,17 @@ async def send_daily_quiz(application: Application) -> None:
                         (chat_id, recent_cutoff),
                     )
                 ]
-                rows = db.build_daily_rows(
-                    conn, today, config.DAILY_IDIOM_COUNT + 10, chat_id,
-                    extra_exclude_ids=recent_sent,
+                # Missed idioms lead the set. They take slots from the total
+                # rather than adding to it, so the session length is unchanged.
+                reasks = _build_reask_questions(
+                    conn, chat_id, max(1, config.DAILY_IDIOM_COUNT // 3)
                 )
-                questions = build_questions_from_rows(conn, rows, chat_id)
+                remaining = config.DAILY_IDIOM_COUNT - len(reasks)
+                rows = db.build_daily_rows(
+                    conn, today, remaining + 10, chat_id,
+                    extra_exclude_ids=recent_sent + [q.idiom_id for q in reasks],
+                )
+                questions = reasks + build_questions_from_rows(conn, rows, chat_id)
             questions = questions[:config.DAILY_IDIOM_COUNT]
         except Exception as e:
             logger.error("Daily quiz: build failed for user %s: %s", chat_id, e)
@@ -550,11 +557,15 @@ async def send_evening_quiz(application: Application) -> None:
                 # Skip idioms already SENT today (regardless of whether user answered).
                 # Covers morning quiz + any /q, even if morning is still un-answered.
                 sent_today = db.get_sent_today(conn, chat_id, today_str)
-                rows = db.build_daily_rows(
-                    conn, today, config.EVENING_IDIOM_COUNT + 10, chat_id,
-                    extra_exclude_ids=sent_today,
+                reasks = _build_reask_questions(
+                    conn, chat_id, max(1, config.EVENING_IDIOM_COUNT // 3)
                 )
-                questions = build_questions_from_rows(conn, rows, chat_id)
+                remaining = config.EVENING_IDIOM_COUNT - len(reasks)
+                rows = db.build_daily_rows(
+                    conn, today, remaining + 10, chat_id,
+                    extra_exclude_ids=sent_today + [q.idiom_id for q in reasks],
+                )
+                questions = reasks + build_questions_from_rows(conn, rows, chat_id)
             questions = questions[:config.EVENING_IDIOM_COUNT]
             if not questions:
                 continue
