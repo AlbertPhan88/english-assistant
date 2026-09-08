@@ -61,10 +61,26 @@ def _question_text(q: Question) -> str:
     return f"{prefix}Fill in the blank:\n\n{q.stem}\n\n{opts}"
 
 
+def _skip_button(idiom_id: int) -> InlineKeyboardButton:
+    return InlineKeyboardButton("⏭ I know this", callback_data=f"skip:{idiom_id}")
+
+
+def _skip_only_keyboard(idiom_id: int) -> InlineKeyboardMarkup:
+    """Markup left on a question once it has been answered or given up on.
+
+    Skipping stays available afterwards: seeing the answer is often what tells
+    you the idiom is already solid and does not need scheduling any more.
+    """
+    return InlineKeyboardMarkup([[_skip_button(idiom_id)]])
+
+
 def _keyboard(q: Question) -> InlineKeyboardMarkup | None:
-    skip_btn = InlineKeyboardButton("⏭ I know this", callback_data=f"skip:{q.idiom_id}")
+    controls = [
+        InlineKeyboardButton("🤷 Don't know", callback_data=f"dunno:{q.idiom_id}"),
+        _skip_button(q.idiom_id),
+    ]
     if q.kind == "production":
-        return InlineKeyboardMarkup([[skip_btn]])
+        return InlineKeyboardMarkup([controls])
     buttons = [
         InlineKeyboardButton(
             LETTERS[i],
@@ -72,7 +88,7 @@ def _keyboard(q: Question) -> InlineKeyboardMarkup | None:
         )
         for i in range(len(q.options))
     ]
-    return InlineKeyboardMarkup([buttons, [skip_btn]])
+    return InlineKeyboardMarkup([buttons, controls])
 
 
 async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -312,6 +328,19 @@ async def cmd_unskip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Couldn't unskip #{idiom_id}.")
 
 
+def _reveal_context(idiom, cached) -> str:
+    """Trailing sentence of an answer reveal.
+
+    Uses the question's own stem with the blank filled in, so the answer reads
+    against the sentence just asked; falls back to a stored example when the
+    question had no blank, as reverse and production questions do not.
+    """
+    stem, kind = (cached[0], cached[1]) if cached else (None, "forward")
+    if stem and kind in ("forward", "completion"):
+        return "\n\n" + stem.replace("___", "[" + idiom["phrase"] + "]")
+    return "\n\n" + (idiom["story"] or idiom["example"] or idiom["meaning"])
+
+
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -340,14 +369,8 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Retrieve the original question stem so the answer shows the same sentence
     cached = _stem_cache.pop(query.message.message_id, None)
-    stem, kind, options = cached if cached else (None, "forward", None)
-
-    if stem and kind in ("forward", "completion"):
-        filled = stem.replace("___", f"[{phrase}]")
-        context_line = f"\n\n{filled}"
-    else:
-        story = idiom["story"] or idiom["example"] or meaning
-        context_line = f"\n\n{story}"
+    options = cached[2] if cached else None
+    context_line = _reveal_context(idiom, cached)
 
     if chosen == correct_index:
         reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}{context_line}"
@@ -359,11 +382,63 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{meaning}{viet_line}{context_line}"
         )
 
-    await query.edit_message_reply_markup(reply_markup=None)
+    await query.edit_message_reply_markup(
+        reply_markup=_skip_only_keyboard(idiom_id)
+    )
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=reply,
         reply_to_message_id=query.message.message_id,
+    )
+
+
+async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reveal the answer to a question the user cannot answer.
+
+    Graded as a miss, exactly like a wrong choice: guessing at random to move on
+    would otherwise feed SM-2 correct answers the user never actually knew.
+    """
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 2 or parts[0] != "dunno":
+        await query.answer()
+        return
+    await query.answer()
+
+    idiom_id = int(parts[1])
+    chat_id = query.message.chat_id
+    message_id = query.message.message_id
+
+    with db.connect(config.DB_PATH) as conn:
+        idiom = db.get_idiom(conn, idiom_id)
+        pending = db.get_production_pending(conn, chat_id, message_id)
+        # Follow-up production turns are bonus practice, so they leave the SM-2
+        # state alone — the same rule _evaluate_production applies.
+        first_turn = pending is None or pending["turn_number"] <= 1
+        if first_turn:
+            db.apply_review(conn, idiom_id, 2, chat_id)
+            db.add_reask(conn, chat_id, idiom_id)
+        # The question is closed now, so stop waiting for a typed sentence.
+        db.clear_production_pending(conn, chat_id, message_id)
+
+    if idiom is None:
+        return
+
+    viet = idiom["vietnamese_equiv"] or ""
+    viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
+    context_line = _reveal_context(idiom, _stem_cache.pop(message_id, None))
+    reply = (
+        f"🤷 Answer: {idiom['phrase']}\n\n"
+        f"{idiom['meaning']}{viet_line}{context_line}"
+    )
+
+    await query.edit_message_reply_markup(
+        reply_markup=_skip_only_keyboard(idiom_id)
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=reply,
+        reply_to_message_id=message_id,
     )
 
 
@@ -703,7 +778,13 @@ async def _send_production_followup(chat_id: int, idiom_id: int, phrase: str,
         "Recall the idiom that fits and use it in a sentence.\n\n"
         "Reply to this message with your sentence 👇"
     )
-    sent = await bot.send_message(chat_id=chat_id, text=stem)
+    sent = await bot.send_message(
+        chat_id=chat_id, text=stem,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🤷 Don't know", callback_data=f"dunno:{idiom_id}"),
+            _skip_button(idiom_id),
+        ]]),
+    )
     new_used = "|".join(used_situations + [situation])
     with db.connect(config.DB_PATH) as conn:
         db.save_production_pending(
@@ -940,6 +1021,7 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler("skipped", cmd_skipped))
     application.add_handler(CommandHandler("unskip", cmd_unskip))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
+    application.add_handler(CallbackQueryHandler(handle_dunno, pattern=r"^dunno:"))
     application.add_handler(CallbackQueryHandler(handle_skip, pattern=r"^skip:"))
     application.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_user_reply))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.REPLY & ~filters.COMMAND, handle_direct_message))
