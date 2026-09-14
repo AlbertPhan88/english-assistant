@@ -51,7 +51,11 @@ def main() -> int:
             if not tags:
                 print(f"  ?      id={row['id']:5} {row['phrase']!r} — no valid tag", flush=True)
                 continue
-            print(f"  tagged id={row['id']:5} {row['phrase']!r}: {format_register(tags)}", flush=True)
+            print(
+                f"  tagged id={row['id']:5} {row['phrase']!r}: "
+                f"{format_register(tags, symbols=False)}",
+                flush=True,
+            )
         if apply and results:
             with db.connect(config.DB_PATH) as conn:
                 for idiom_id, tags in results.items():

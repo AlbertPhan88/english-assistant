@@ -23,9 +23,40 @@ REGISTER_AXES = {
 REGISTER_SINGLE = ("formality", "medium", "connotation")
 REGISTER_MULTI = ("domain", "flavour")
 
+# Shown in place of the words, so a tag line scans in one glance instead of
+# being read. Formality runs as a dress code — t-shirt, collar, top hat — so
+# the three values read as one scale rather than three unrelated icons.
+REGISTER_SYMBOLS = {
+    "formality": {"I": "👕", "N": "👔", "F": "🎩"},
+    "medium": {"S": "🗣", "W": "✍️"},
+    "domain": {"A": "🎓", "L": "📜", "LEG": "⚖️", "BUS": "💼", "JNL": "📰"},
+    "flavour": {"O": "🕰", "H": "😄"},
+    "connotation": {"P": "🟢", "NEG": "🔴", "NEU": ""},
+}
 
-def format_register(register_json: str | None) -> str:
-    """Render stored register tags as one readable line, or "" if untagged."""
+REGISTER_AXIS_ORDER = ("formality", "medium", "domain", "flavour", "connotation")
+
+
+def register_legend() -> str:
+    """The symbol key, for /help. Grouped by axis, one line each."""
+    lines = []
+    for axis in REGISTER_AXIS_ORDER:
+        pairs = [
+            f"{REGISTER_SYMBOLS[axis][code]} {word}"
+            for code, word in REGISTER_AXES[axis].items()
+            if REGISTER_SYMBOLS[axis][code]
+        ]
+        lines.append(f"{axis}: " + "  ".join(pairs))
+    return "\n".join(lines)
+
+
+def format_register(register_json: str | None, symbols: bool = True) -> str:
+    """Render stored register tags as one line, or "" if untagged.
+
+    Symbols by default: the line is glanced at on every reveal, and five spelled
+    out words are read rather than scanned. Pass symbols=False for the words,
+    which the tagging script prints so its output stays greppable.
+    """
     import json
     if not register_json:
         return ""
@@ -33,19 +64,20 @@ def format_register(register_json: str | None) -> str:
         tags = json.loads(register_json)
     except (ValueError, TypeError):
         return ""
-    words = []
-    for axis in ("formality", "medium", "domain", "flavour", "connotation"):
-        table = REGISTER_AXES[axis]
+    table_set = REGISTER_SYMBOLS if symbols else REGISTER_AXES
+    parts = []
+    for axis in REGISTER_AXIS_ORDER:
+        table = table_set[axis]
         value = tags.get(axis)
         if not value:
             continue
-        # A neutral connotation is the default and carries no advice, and
-        # printing it would collide with a neutral formality on the same line.
+        # A neutral connotation is the default and carries no advice. As a word
+        # it would also collide with a neutral formality on the same line.
         if axis == "connotation" and value == "NEU":
             continue
         codes = [value] if isinstance(value, str) else value
-        words.extend(table[c] for c in codes if c in table)
-    return " · ".join(words)
+        parts.extend(table[c] for c in codes if table.get(c))
+    return " ".join(parts) if symbols else " · ".join(parts)
 
 TAG_THEMES_PROMPT = """You are tagging English idioms with a single theme.
 

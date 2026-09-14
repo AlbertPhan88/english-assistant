@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 from . import config, db
+from .examples import register_legend
 from .quiz import Question, build_daily_set, build_one, build_question_from_story, build_questions_from_rows
 
 logger = logging.getLogger(__name__)
@@ -246,7 +247,8 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             rows = db.due_idioms(conn, config.today_local(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
             story_idioms = [
                 {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
-                 "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
+                 "viet": r["vietnamese_equiv"] or "",
+                 "register": _register_line(r, inline=True)}
                 for r in rows
             ]
         if not story_idioms:
@@ -280,7 +282,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/stats  — see your progress\n"
         "/skipped — list idioms you've marked as known\n"
         "/unskip <id or phrase> — bring a skipped idiom back\n"
-        "/help   — this message"
+        "/help   — this message\n\n"
+        "🏷 tone & register key — when an idiom is sayable:\n"
+        + register_legend()
     )
 
 
@@ -331,18 +335,22 @@ async def cmd_unskip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Couldn't unskip #{idiom_id}.")
 
 
-def _register_line(idiom) -> str:
-    """Tone-and-register tags as a labelled line, or "" when the idiom is untagged.
+def _register_line(idiom, inline: bool = False) -> str:
+    """Tone-and-register tags, or "" when the idiom is untagged.
 
     Shown wherever an idiom is taught rather than merely asked, since the tags
-    answer when the phrase is sayable — the thing meaning alone does not give you.
+    answer when the phrase is sayable — the thing meaning alone does not give
+    you. `inline` keeps them on the current line, for bulleted phrase lists;
+    otherwise they get a line of their own under the meaning.
     """
     from .examples import format_register
     try:
         tags = format_register(idiom["register"])
     except (IndexError, KeyError):
         return ""
-    return f"\n🏷 {tags}" if tags else ""
+    if not tags:
+        return ""
+    return f" 🏷 {tags}" if inline else f"\n🏷 {tags}"
 
 
 def _reveal_context(idiom, cached) -> str:
@@ -519,7 +527,8 @@ async def send_daily_quiz(application: Application) -> None:
 
     story_idioms = [
         {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
-         "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
+         "viet": r["vietnamese_equiv"] or "",
+         "register": _register_line(r, inline=True)}
         for r in story_rows
     ]
     idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
@@ -695,7 +704,8 @@ async def send_weekly_review(application: Application) -> None:
 
             story_idioms = [
                 {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
-                 "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
+                 "viet": r["vietnamese_equiv"] or "",
+                 "register": _register_line(r, inline=True)}
                 for r in rows
             ]
             bullet_lines = []
