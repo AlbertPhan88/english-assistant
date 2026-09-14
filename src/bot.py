@@ -245,7 +245,8 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         with db.connect(config.DB_PATH) as conn:
             rows = db.due_idioms(conn, config.today_local(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
             story_idioms = [
-                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
+                 "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
                 for r in rows
             ]
         if not story_idioms:
@@ -254,7 +255,9 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
         story = generate_daily_story(story_idioms, client)
         phrases = "\n".join(
-            f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+            f'• "{i["phrase"]}"'
+            + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+            + i.get("register", "")
             for i in story_idioms
         )
         if not story:
@@ -328,6 +331,20 @@ async def cmd_unskip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Couldn't unskip #{idiom_id}.")
 
 
+def _register_line(idiom) -> str:
+    """Tone-and-register tags as a labelled line, or "" when the idiom is untagged.
+
+    Shown wherever an idiom is taught rather than merely asked, since the tags
+    answer when the phrase is sayable — the thing meaning alone does not give you.
+    """
+    from .examples import format_register
+    try:
+        tags = format_register(idiom["register"])
+    except (IndexError, KeyError):
+        return ""
+    return f"\n🏷 {tags}" if tags else ""
+
+
 def _reveal_context(idiom, cached) -> str:
     """Trailing sentence of an answer reveal.
 
@@ -372,14 +389,15 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     options = cached[2] if cached else None
     context_line = _reveal_context(idiom, cached)
 
+    register_line = _register_line(idiom)
     if chosen == correct_index:
-        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}{context_line}"
+        reply = f"✅ Correct!\n\n{phrase} — {meaning}{viet_line}{register_line}{context_line}"
     else:
         chosen_label = options[chosen] if options and chosen < len(options) else LETTERS[chosen]
         reply = (
             f"❌ You chose: {chosen_label}\n"
             f"✅ Answer: {phrase}\n\n"
-            f"{meaning}{viet_line}{context_line}"
+            f"{meaning}{viet_line}{register_line}{context_line}"
         )
 
     await query.edit_message_reply_markup(
@@ -429,7 +447,7 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context_line = _reveal_context(idiom, _stem_cache.pop(message_id, None))
     reply = (
         f"🤷 Answer: {idiom['phrase']}\n\n"
-        f"{idiom['meaning']}{viet_line}{context_line}"
+        f"{idiom['meaning']}{viet_line}{_register_line(idiom)}{context_line}"
     )
 
     await query.edit_message_reply_markup(
@@ -500,12 +518,15 @@ async def send_daily_quiz(application: Application) -> None:
     story_rows = fresh_rows + pipeline_rows
 
     story_idioms = [
-        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
+         "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
         for r in story_rows
     ]
     idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
     phrases_str = "\n".join(
-        f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+        f'• "{i["phrase"]}"'
+        + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+        + i.get("register", "")
         for i in story_idioms
     )
 
@@ -567,7 +588,8 @@ async def send_daily_quiz(application: Application) -> None:
                 story_line = f"\n\n{iotd_story_text}" if iotd_story_text else ""
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🌟 Idiom of the Day\n\n{iotd_phrase}\n{iotd_meaning}{viet_line}{story_line}",
+                    text=(f"🌟 Idiom of the Day\n\n{iotd_phrase}\n{iotd_meaning}"
+                          f"{viet_line}{_register_line(iotd)}{story_line}"),
                 )
                 with db.connect(config.DB_PATH) as conn:
                     db.mark_idiom_of_the_day(conn, chat_id, iotd["id"], today)
@@ -672,7 +694,8 @@ async def send_weekly_review(application: Application) -> None:
                 questions = build_questions_from_rows(conn, rows, chat_id)
 
             story_idioms = [
-                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"], "viet": r["vietnamese_equiv"] or ""}
+                {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
+                 "viet": r["vietnamese_equiv"] or "", "register": _register_line(r)}
                 for r in rows
             ]
             bullet_lines = []
@@ -683,7 +706,9 @@ async def send_weekly_review(application: Application) -> None:
             bullets = "\n".join(bullet_lines)
 
             phrases_str = "\n".join(
-                f'• "{i["phrase"]}"' + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+                f'• "{i["phrase"]}"'
+                + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+                + i.get("register", "")
                 for i in story_idioms
             )
             daily_story = ""
@@ -855,7 +880,8 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
                 db.add_reask(conn, update.message.chat_id, idiom_id)
 
     icon = "✅" if correct else "❌"
-    await update.message.reply_text(f"{icon} {feedback}")
+    register_line = _register_line(idiom) if idiom else ""
+    await update.message.reply_text(f"{icon} {feedback}{register_line}")
 
     # Multi-turn drill: chain another situation if correct AND we haven't hit the cap.
     # For graduated (phase >= 3) idioms only — boot items are still learning basics.

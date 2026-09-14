@@ -230,6 +230,10 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE idioms ADD COLUMN story TEXT")
     if "theme" not in cols:
         conn.execute("ALTER TABLE idioms ADD COLUMN theme TEXT")
+    if "register" not in cols:
+        # Tone and register tags, stored as one JSON object. See
+        # examples.REGISTER_AXES for the axes and their allowed values.
+        conn.execute("ALTER TABLE idioms ADD COLUMN register TEXT")
 
     ds_cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_stories)")}
     if "story_vi" not in ds_cols:
@@ -785,6 +789,19 @@ def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:
 
 
 # --- Theme tagging ---
+
+def idioms_missing_register(conn) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT id, phrase, meaning FROM idioms "
+        "WHERE register IS NULL OR register = ''"
+    ))
+
+
+def update_register(conn, idiom_id: int, register_json: str) -> None:
+    conn.execute(
+        "UPDATE idioms SET register = ? WHERE id = ?", (register_json, idiom_id)
+    )
+
 
 def idioms_missing_theme(conn) -> list[sqlite3.Row]:
     return list(conn.execute(

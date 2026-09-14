@@ -6,6 +6,47 @@ from .db import THEME_ORDER
 
 THEME_LIST = THEME_ORDER
 
+# Tone and register scheme from the "Living the Language" methods handout
+# (pp. 46-47). Codes are the handout's own; the words are what gets shown to
+# the learner, since the point of the tag is knowing when an idiom is sayable.
+REGISTER_AXES = {
+    "formality": {"I": "informal", "N": "neutral", "F": "formal"},
+    "medium": {"S": "spoken", "W": "written"},
+    "domain": {
+        "A": "academic", "L": "literary", "LEG": "legal",
+        "BUS": "business", "JNL": "journalism",
+    },
+    "flavour": {"O": "old-fashioned", "H": "humorous"},
+    "connotation": {"P": "positive", "NEG": "negative", "NEU": "neutral"},
+}
+# Axes that hold one value; the rest hold a list and are often empty.
+REGISTER_SINGLE = ("formality", "medium", "connotation")
+REGISTER_MULTI = ("domain", "flavour")
+
+
+def format_register(register_json: str | None) -> str:
+    """Render stored register tags as one readable line, or "" if untagged."""
+    import json
+    if not register_json:
+        return ""
+    try:
+        tags = json.loads(register_json)
+    except (ValueError, TypeError):
+        return ""
+    words = []
+    for axis in ("formality", "medium", "domain", "flavour", "connotation"):
+        table = REGISTER_AXES[axis]
+        value = tags.get(axis)
+        if not value:
+            continue
+        # A neutral connotation is the default and carries no advice, and
+        # printing it would collide with a neutral formality on the same line.
+        if axis == "connotation" and value == "NEU":
+            continue
+        codes = [value] if isinstance(value, str) else value
+        words.extend(table[c] for c in codes if c in table)
+    return " · ".join(words)
+
 TAG_THEMES_PROMPT = """You are tagging English idioms with a single theme.
 
 Theme list (choose exactly one per idiom):
@@ -21,6 +62,36 @@ Rules:
 - Output ONLY the id|theme lines, one per idiom, nothing else.
 - Use only themes from the list above.
 - If unsure, use "general"."""
+
+
+TAG_REGISTER_PROMPT = """You are tagging English idioms for tone and register, so a
+learner knows when each one is appropriate to say.
+
+Tag every idiom on five axes:
+  formality   — exactly one of: I (informal), N (neutral), F (formal)
+  medium      — exactly one of: S (more natural in speech), W (more natural in writing)
+  domain      — zero or more of: A (academic), L (literary), LEG (legal), BUS (business), JNL (journalism)
+  flavour     — zero or more of: O (old-fashioned), H (humorous)
+  connotation — exactly one of: P (positive), NEG (negative), NEU (neutral)
+
+Calibration — these near-synonyms differ only by register:
+  a bunch of [I]   a lot of [N]   a great deal of [F, A]   a plethora of [F, NEG]   a myriad of [F, L]
+  mod [I]   modify [N]   modulate [F]   alter [F, A]   amend [F, LEG]
+
+For each idiom below, output one line:
+id|formality|medium|domain|flavour|connotation
+
+Use a comma-separated list for domain and flavour, or - when none applies.
+
+Idioms:
+{idiom_lines}
+
+Rules:
+- Output ONLY the pipe lines, one per idiom, nothing else.
+- Use only the codes listed above, exactly as spelled.
+- Most everyday idioms are S with no domain and no flavour. Do not invent domains.
+- connotation describes the idiom itself, not the situation it describes.
+- If genuinely unsure, use N, S, -, -, NEU."""
 
 
 FUNNY_PROMPT = """For the idiom "{phrase}" (meaning: {meaning}), return exactly 2 lines:
@@ -364,6 +435,55 @@ def tag_themes_batch(batch: list, client: Anthropic, model: str = "claude-haiku-
         if theme not in THEME_LIST:
             continue
         results[int(id_str)] = theme
+    return results
+
+
+def _parse_register_line(line: str) -> tuple[int, str] | None:
+    """Parse one `id|formality|medium|domain|flavour|connotation` line.
+
+    Returns (idiom_id, json) or None when any field is missing or not one of
+    the handout's codes — a malformed tag is dropped rather than stored, so a
+    later run can retry the idiom.
+    """
+    import json
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) != 6 or not parts[0].isdigit():
+        return None
+    _, formality, medium, domain, flavour, connotation = parts
+    tags: dict[str, object] = {}
+    for axis, raw in (
+        ("formality", formality), ("medium", medium), ("connotation", connotation),
+    ):
+        code = raw.upper()
+        if code not in REGISTER_AXES[axis]:
+            return None
+        tags[axis] = code
+    for axis, raw in (("domain", domain), ("flavour", flavour)):
+        codes = [c.strip().upper() for c in raw.split(",") if c.strip() not in ("", "-")]
+        if any(c not in REGISTER_AXES[axis] for c in codes):
+            return None
+        tags[axis] = codes
+    return int(parts[0]), json.dumps(tags)
+
+
+def tag_register_batch(batch: list, client: Anthropic,
+                       model: str = "claude-haiku-4-5-20251001") -> dict[int, str]:
+    """Tag up to 20 idioms for tone and register in one call. Returns {id: json}."""
+    idiom_lines = "\n".join(
+        f"{row['id']}. {row['phrase']} — {row['meaning']}" for row in batch
+    )
+    resp = client.messages.create(
+        model=model,
+        max_tokens=1000,
+        messages=[{"role": "user", "content": TAG_REGISTER_PROMPT.format(idiom_lines=idiom_lines)}],
+    )
+    raw = resp.content[0].text.strip() if resp.content else ""
+    wanted = {row["id"] for row in batch}
+    results = {}
+    for line in raw.splitlines():
+        parsed = _parse_register_line(line.strip())
+        if parsed and parsed[0] in wanted:
+            results[parsed[0]] = parsed[1]
     return results
 
 
