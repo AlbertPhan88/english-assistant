@@ -283,7 +283,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/skipped — list idioms you've marked as known\n"
         "/unskip <id or phrase> — bring a skipped idiom back\n"
         "/help   — this message\n\n"
-        "🏷 tone & register key — when an idiom is sayable:\n"
+        "Tone & register key — when an idiom is sayable:\n"
         + register_legend()
     )
 
@@ -350,7 +350,7 @@ def _register_line(idiom, inline: bool = False) -> str:
         return ""
     if not tags:
         return ""
-    return f" 🏷 {tags}" if inline else f"\n🏷 {tags}"
+    return f"  {tags}" if inline else f"\n{tags}"
 
 
 def _reveal_context(idiom, cached) -> str:
