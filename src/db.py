@@ -210,6 +210,28 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE production_cache ADD COLUMN turn_number INTEGER NOT NULL DEFAULT 1")
     if "used_situations" not in pc_cols:
         conn.execute("ALTER TABLE production_cache ADD COLUMN used_situations TEXT NOT NULL DEFAULT ''")
+    # Every graded production answer, kept so a verdict can be reviewed later.
+    # The cache row is deleted on grading, so without this the sentence and the
+    # judgement on it are both lost the moment the reply is processed.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS production_answers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER NOT NULL,
+            idiom_id    INTEGER NOT NULL,
+            phrase      TEXT NOT NULL,
+            situation   TEXT NOT NULL DEFAULT '',
+            sentence    TEXT NOT NULL,
+            correct     INTEGER NOT NULL,
+            feedback    TEXT NOT NULL DEFAULT '',
+            turn_number INTEGER NOT NULL DEFAULT 1,
+            answered_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_production_answers_chat_time "
+        "ON production_answers(chat_id, answered_at)"
+    )
+
     # Per-day log of sent questions so evening quiz can avoid morning duplicates.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS question_sent (
@@ -652,6 +674,34 @@ def clear_production_pending(conn, chat_id: int, message_id: int) -> None:
         "DELETE FROM production_cache WHERE chat_id = ? AND message_id = ?",
         (chat_id, message_id),
     )
+
+
+def log_production_answer(conn, chat_id: int, idiom_id: int, phrase: str,
+                          situation: str, sentence: str, correct: bool,
+                          feedback: str, turn_number: int) -> None:
+    """Record a graded production answer, so the verdict can be checked later."""
+    from . import config
+    conn.execute(
+        """INSERT INTO production_answers(
+             chat_id, idiom_id, phrase, situation, sentence, correct,
+             feedback, turn_number, answered_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (chat_id, idiom_id, phrase, situation, sentence, 1 if correct else 0,
+         feedback, turn_number, config.now_local().isoformat()),
+    )
+
+
+def recent_production_answers(conn, chat_id: int, n: int = 10,
+                              only_wrong: bool = False) -> list[sqlite3.Row]:
+    """Most recent graded production answers, newest first."""
+    where = "WHERE chat_id = ?" + (" AND correct = 0" if only_wrong else "")
+    return list(conn.execute(
+        f"""SELECT phrase, situation, sentence, correct, feedback,
+                   turn_number, answered_at
+            FROM production_answers {where}
+            ORDER BY answered_at DESC LIMIT ?""",
+        (chat_id, n),
+    ))
 
 
 def clear_production_pending_upto(conn, chat_id: int, idiom_id: int,

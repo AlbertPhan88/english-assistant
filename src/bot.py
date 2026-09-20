@@ -935,6 +935,14 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
             db.apply_review(conn, idiom_id, quality, user_id)
             if not correct:
                 db.add_reask(conn, update.message.chat_id, idiom_id)
+        # Logged for every turn, and before any of it can be lost: grading
+        # deletes the cache row, so the sentence and the verdict on it would
+        # otherwise leave no trace to review.
+        db.log_production_answer(
+            conn, update.message.chat_id, idiom_id, phrase,
+            used_situations[-1] if used_situations else "",
+            user_sentence, correct, feedback, turn_number,
+        )
 
     icon = "✅" if correct else "❌"
     register_line = _register_line(idiom) if idiom else ""
