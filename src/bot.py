@@ -216,6 +216,51 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Work through the backlog of production questions that were never answered.
+
+    The daily sets pick by due date, so a question left unanswered is not
+    prioritised on the next run — it just sits. This drains that pile on demand,
+    oldest first, a few at a time.
+    """
+    from .quiz import build_production_question
+
+    chat_id = update.effective_chat.id
+    n = 5
+    if context.args:
+        try:
+            n = max(1, min(int(context.args[0]), 20))
+        except ValueError:
+            pass
+
+    with db.connect(config.DB_PATH) as conn:
+        total = db.count_unanswered_production(conn, chat_id)
+        rows = db.unanswered_production_idioms(conn, chat_id, n)
+        questions = []
+        for row in rows:
+            idiom = db.get_review_row(conn, row["idiom_id"], chat_id)
+            if idiom is None:
+                continue
+            try:
+                questions.append(build_production_question(conn, idiom))
+            except ValueError:
+                continue
+
+    if not questions:
+        await update.message.reply_text(
+            "Nothing pending — you've answered every production question sent to you. 🎉"
+        )
+        return
+
+    remaining = max(0, total - len(questions))
+    await update.message.reply_text(
+        f"✍️ {len(questions)} unanswered production questions, oldest first. "
+        f"{remaining} left after these — run /pending again for more."
+    )
+    for q in questions:
+        await _send_question(chat_id, q, context)
+
+
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today = config.today_local().isoformat()
     with db.connect(config.DB_PATH) as conn:
@@ -278,6 +323,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start  — register\n"
         "/quiz   — get 5 questions now\n"
         "/quiz N — get N questions (max 20)\n"
+        "/pending — unanswered production questions (/pending N for more)\n"
         "/story  — today's idiom story\n"
         "/stats  — see your progress\n"
         "/skipped — list idioms you've marked as known\n"
@@ -444,8 +490,9 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if first_turn:
             db.apply_review(conn, idiom_id, 2, chat_id)
             db.add_reask(conn, chat_id, idiom_id)
-        # The question is closed now, so stop waiting for a typed sentence.
-        db.clear_production_pending(conn, chat_id, message_id)
+        # The question is closed now, so stop waiting for a typed sentence —
+        # including any older unanswered copy of the same idiom.
+        db.clear_production_pending_upto(conn, chat_id, idiom_id, message_id)
 
     if idiom is None:
         return
@@ -939,7 +986,9 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ok = await _evaluate_production(update, context, prod, msg.text or "")
         if ok:
             with db.connect(config.DB_PATH) as conn:
-                db.clear_production_pending(conn, chat_id, replied_id)
+                db.clear_production_pending_upto(
+                    conn, chat_id, pending["idiom_id"], replied_id
+                )
         return
 
     user_question = msg.text or ""
@@ -1003,6 +1052,8 @@ def run(db_path: str) -> None:
         await app.bot.set_my_commands([
             BotCommand("q", "Quick quiz (alias /quiz)"),
             BotCommand("quiz", "Get 5 questions now (/quiz N for more)"),
+            BotCommand("p", "Unanswered production questions (alias /pending)"),
+            BotCommand("pending", "Work through unanswered production questions"),
             BotCommand("s", "Today's story (alias /story)"),
             BotCommand("story", "Today's idiom story"),
             BotCommand("stats", "See your progress"),
@@ -1051,6 +1102,7 @@ def run(db_path: str) -> None:
     )
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler(["quiz", "q"], cmd_quiz))
+    application.add_handler(CommandHandler(["pending", "p"], cmd_pending))
     application.add_handler(CommandHandler(["story", "s"], cmd_story))
     application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
     application.add_handler(CommandHandler(["help", "h"], cmd_help))

@@ -654,6 +654,49 @@ def clear_production_pending(conn, chat_id: int, message_id: int) -> None:
     )
 
 
+def clear_production_pending_upto(conn, chat_id: int, idiom_id: int,
+                                  message_id: int) -> None:
+    """Clear the answered pending row and every older one for the same idiom.
+
+    An idiom sent on several days and left unanswered each time leaves a row per
+    send, so clearing only the replied-to message would keep the idiom in the
+    backlog forever. Rows newer than the reply are kept: by this point a
+    multi-turn follow-up may already have queued one.
+    """
+    conn.execute(
+        "DELETE FROM production_cache "
+        "WHERE chat_id = ? AND idiom_id = ? AND message_id <= ?",
+        (chat_id, idiom_id, message_id),
+    )
+
+
+def unanswered_production_idioms(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
+    """Idioms whose production questions were sent but never graded, oldest first.
+
+    A production_cache row lives until the answer is graded, so the table doubles
+    as the backlog. Deduped by idiom, and idioms marked known are left out.
+    """
+    return list(conn.execute(
+        """SELECT p.idiom_id, MIN(p.created_at) AS first_sent, COUNT(*) AS times
+           FROM production_cache p
+           JOIN reviews r ON r.idiom_id = p.idiom_id AND r.user_id = p.chat_id
+           WHERE p.chat_id = ? AND r.skipped = 0
+           GROUP BY p.idiom_id
+           ORDER BY first_sent ASC
+           LIMIT ?""",
+        (chat_id, n),
+    ))
+
+
+def count_unanswered_production(conn, chat_id: int) -> int:
+    return conn.execute(
+        """SELECT COUNT(DISTINCT p.idiom_id) FROM production_cache p
+           JOIN reviews r ON r.idiom_id = p.idiom_id AND r.user_id = p.chat_id
+           WHERE p.chat_id = ? AND r.skipped = 0""",
+        (chat_id,),
+    ).fetchone()[0]
+
+
 def log_question_sent(conn, chat_id: int, idiom_id: int, sent_date: str) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO question_sent(chat_id, idiom_id, sent_date) VALUES (?, ?, ?)",
