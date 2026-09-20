@@ -221,7 +221,7 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     The daily sets pick by due date, so a question left unanswered is not
     prioritised on the next run — it just sits. This drains that pile on demand,
-    oldest first, a few at a time.
+    freshest first, a few at a time.
     """
     from .quiz import build_production_question
 
@@ -254,7 +254,7 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     remaining = max(0, total - len(questions))
     await update.message.reply_text(
-        f"✍️ {len(questions)} unanswered production questions, oldest first. "
+        f"✍️ {len(questions)} unanswered production questions, most recent first. "
         f"{remaining} left after these — run /pending again for more."
     )
     for q in questions:

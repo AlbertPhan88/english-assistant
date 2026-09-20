@@ -671,18 +671,25 @@ def clear_production_pending_upto(conn, chat_id: int, idiom_id: int,
 
 
 def unanswered_production_idioms(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
-    """Idioms whose production questions were sent but never graded, oldest first.
+    """Idioms whose production questions were sent but never graded, freshest first.
 
     A production_cache row lives until the answer is graded, so the table doubles
     as the backlog. Deduped by idiom, and idioms marked known are left out.
+
+    Ordered by the most recent send rather than the first. A question from
+    yesterday still has its story and quiz context in mind, where one from two
+    months ago has to be re-learnt before it can be answered. Chronic repeats
+    are not buried by this: an idiom the daily sets keep re-sending has a recent
+    last send too, so it still surfaces early.
     """
     return list(conn.execute(
-        """SELECT p.idiom_id, MIN(p.created_at) AS first_sent, COUNT(*) AS times
+        """SELECT p.idiom_id, MIN(p.created_at) AS first_sent,
+                  MAX(p.created_at) AS last_sent, COUNT(*) AS times
            FROM production_cache p
            JOIN reviews r ON r.idiom_id = p.idiom_id AND r.user_id = p.chat_id
            WHERE p.chat_id = ? AND r.skipped = 0
            GROUP BY p.idiom_id
-           ORDER BY first_sent ASC
+           ORDER BY last_sent DESC
            LIMIT ?""",
         (chat_id, n),
     ))
