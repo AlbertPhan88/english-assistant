@@ -49,7 +49,7 @@ def classify(phrase: str, meaning: str, client: Anthropic) -> tuple[str, str | N
         max_tokens=60,
         messages=[{"role": "user", "content": PROMPT.format(phrase=phrase, meaning=meaning)}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     line = next((l.strip() for l in raw.splitlines() if l.strip()), "")
     upper = line.upper()
     if upper.startswith("KEEP"):

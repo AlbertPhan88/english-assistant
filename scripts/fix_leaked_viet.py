@@ -49,7 +49,7 @@ def regen(phrase: str, meaning: str, client: Anthropic) -> str:
                 messages=[{"role": "user", "content": VIET_EQUIV_PROMPT.format(
                     phrase=phrase, meaning=meaning)}],
             )
-            raw = resp.content[0].text.strip() if resp.content else ""
+            raw = config.response_text(resp)
             for line in raw.splitlines():
                 line = line.strip().strip('"').strip("—").strip()
                 if not line or looks_leaked(line):

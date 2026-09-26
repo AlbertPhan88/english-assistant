@@ -48,6 +48,74 @@ Rules:
 - Do NOT exceed 4 lines total."""
 
 
+# Fields a content fix may rewrite. Anything outside this set is ignored, so a
+# stray line in the model's reply cannot reach the UPDATE statement.
+FIXABLE_FIELDS = {
+    "phrase": "the idiom headword itself",
+    "meaning": "the English definition",
+    "vietnamese_equiv": "the Vietnamese equivalent",
+    "example": "the example sentence",
+    "story": "the mini-story",
+}
+
+CONTENT_FIX_PROMPT = """You maintain an English-idiom study database for a Vietnamese learner.
+They have reported a problem with one entry. Correct it.
+
+Current entry:
+phrase: {phrase}
+meaning: {meaning}
+vietnamese_equiv: {vietnamese_equiv}
+example: {example}
+story: {story}
+
+Their report: "{complaint}"
+
+Decide which fields are actually wrong and rewrite only those. Output one line per
+field you are changing, in this exact format:
+
+FIELD: <field name>
+VALUE: <the corrected value, on one line>
+
+Repeat the pair for each field. Field names must be exactly one of:
+phrase, meaning, vietnamese_equiv, example, story
+
+Then one final line:
+NOTE: <one sentence telling the learner what you changed and why>
+
+Rules:
+- Change as little as possible. If the report is about the meaning, do not rewrite the story too.
+- If their report is mistaken and the entry is already correct, output only:
+  FIELD: none
+  NOTE: <one sentence explaining why the current entry is right>
+- example and story must contain the phrase verbatim (or a natural inflection).
+- vietnamese_equiv must be natural Vietnamese, not a word-for-word gloss.
+- Keep each value on a single line. No markdown, no quotes around values."""
+
+
+def _parse_content_fix(raw: str) -> tuple[dict[str, str], str]:
+    """Parse the model's FIELD/VALUE/NOTE reply into (updates, note).
+
+    Only whitelisted field names survive, and a FIELD line without a following
+    VALUE is dropped — a malformed reply yields no updates rather than a bad write.
+    """
+    updates: dict[str, str] = {}
+    note = ""
+    pending_field = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.upper().startswith("FIELD:"):
+            name = line.split(":", 1)[1].strip().lower()
+            pending_field = name if name in FIXABLE_FIELDS else None
+        elif line.upper().startswith("VALUE:"):
+            value = line.split(":", 1)[1].strip()
+            if pending_field and value:
+                updates[pending_field] = value
+            pending_field = None
+        elif line.upper().startswith("NOTE:"):
+            note = line.split(":", 1)[1].strip()
+    return updates, note
+
+
 def _question_text(q: Question) -> str:
     opts = "\n".join(f"{LETTERS[i]}. {opt}" for i, opt in enumerate(q.options))
     prefix = "↩️ Try again — you missed this one before.\n\n" if q.reask else ""
@@ -102,6 +170,9 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
     # can exclude morning items even if the user hasn't answered them yet.
     with db.connect(config.DB_PATH) as conn:
         db.log_question_sent(conn, chat_id, q.idiom_id, config.today_local().isoformat())
+        # Anchor the message to its idiom so a later reply — an answer or a
+        # content complaint — can be traced back whatever the question type.
+        db.log_question_msg(conn, chat_id, msg.message_id, q.idiom_id, q.kind)
         if q.kind == "production":
             db.save_production_pending(
                 conn, chat_id, msg.message_id, q.idiom_id, q.phrase,
@@ -262,9 +333,10 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     today = config.today_local().isoformat()
     with db.connect(config.DB_PATH) as conn:
-        row = db.get_daily_story(conn, today)
+        row = db.get_daily_story(conn, chat_id, today)
 
     if row and row["story_vi"]:
         with db.connect(config.DB_PATH) as conn:
@@ -289,7 +361,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             story_idioms = db.get_idioms_by_ids(conn, idiom_ids_str) if idiom_ids_str else []
     else:
         with db.connect(config.DB_PATH) as conn:
-            rows = db.due_idioms(conn, config.today_local(), config.DAILY_IDIOM_COUNT, update.effective_user.id)
+            rows = db.due_idioms(conn, config.today_local(), config.DAILY_IDIOM_COUNT, chat_id)
             story_idioms = [
                 {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
                  "viet": r["vietnamese_equiv"] or "",
@@ -313,7 +385,7 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     story_vi = translate_to_vietnamese(story, client, idioms=story_idioms)
     with db.connect(config.DB_PATH) as conn:
-        db.save_daily_story(conn, today, story, phrases, story_vi, idiom_ids_str)
+        db.save_daily_story(conn, chat_id, today, story, phrases, story_vi, idiom_ids_str)
     vi_section = f"\n\n🇻🇳 Bản dịch:\n{story_vi}" if story_vi else ""
     await update.message.reply_text(f"📖 Today's story\n\n{phrases}\n\n{story}{vi_section}")
 
@@ -329,6 +401,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/skipped — list idioms you've marked as known\n"
         "/unskip <id or phrase> — bring a skipped idiom back\n"
         "/help   — this message\n\n"
+        "Spot a mistake? Reply to the question with ! and what's wrong —\n"
+        "e.g. \"! the Vietnamese is a literal gloss, not a real idiom\".\n"
+        "\"fix:\" and \"sai:\" work too. I'll correct the entry and show the diff.\n\n"
         "Tone & register key — when an idiom is sayable:\n"
         + register_legend()
     )
@@ -544,6 +619,54 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+def _build_story_for(conn, chat_id: int, today, client) -> tuple[str, str, str]:
+    """Generate one user's daily story. Returns (story, vietnamese, phrase_list).
+
+    Each user gets their own story built from their own pipeline. The story is
+    what introduces an idiom before it is ever quizzed, and the story-introduced
+    quiz bucket reads back the stories that user was actually sent, so sharing
+    one story across users would seed everyone's pipeline from one person's
+    progress.
+
+    Uses a SMALLER idiom set than the quiz so the rendered message stays under
+    Telegram's 4096-char per-message limit, and reserves slots for FRESH phase-0
+    idioms — ones this user has never met in a story — to keep the introduction
+    pipeline flowing.
+    """
+    fresh_slots = min(5, config.STORY_IDIOM_COUNT // 3)
+    remaining_slots = config.STORY_IDIOM_COUNT - fresh_slots
+    fresh_rows = db.never_in_story_idioms(conn, fresh_slots, [], chat_id)
+    fresh_ids = [r["id"] for r in fresh_rows]
+    pipeline_rows = db.build_daily_rows(
+        conn, today, remaining_slots, chat_id, extra_exclude_ids=fresh_ids,
+    )
+    story_rows = fresh_rows + pipeline_rows
+    if not story_rows:
+        return "", "", ""
+
+    story_idioms = [
+        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
+         "viet": r["vietnamese_equiv"] or "",
+         "register": _register_line(r, inline=True)}
+        for r in story_rows
+    ]
+    phrases_str = "\n".join(
+        f'• "{i["phrase"]}"'
+        + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
+        + i.get("register", "")
+        for i in story_idioms
+    )
+    story = generate_daily_story(story_idioms, client)
+    if not story:
+        return "", "", phrases_str
+    story_vi = translate_to_vietnamese(story, client, idioms=story_idioms)
+    db.save_daily_story(
+        conn, chat_id, today.isoformat(), story, phrases_str, story_vi,
+        ",".join(str(i["id"]) for i in story_idioms),
+    )
+    return story, story_vi, phrases_str
+
+
 async def send_daily_quiz(application: Application) -> None:
     from anthropic import Anthropic
     from .examples import generate_daily_story, translate_to_vietnamese
@@ -556,46 +679,6 @@ async def send_daily_quiz(application: Application) -> None:
 
     if not users:
         return
-
-    # Generate a shared daily story using a SMALLER idiom set so the rendered
-    # message stays under Telegram's 4096-char per-message limit.
-    # Reserve some slots for FRESH phase-0 idioms (never seen in any story)
-    # so the introduction pipeline keeps flowing.
-    first_uid = users[0]
-    fresh_slots = min(5, config.STORY_IDIOM_COUNT // 3)
-    remaining_slots = config.STORY_IDIOM_COUNT - fresh_slots
-    with db.connect(config.DB_PATH) as conn:
-        fresh_rows = db.never_in_story_idioms(conn, fresh_slots, [], first_uid)
-        fresh_ids = [r["id"] for r in fresh_rows]
-        pipeline_rows = db.build_daily_rows(
-            conn, today, remaining_slots, first_uid, extra_exclude_ids=fresh_ids,
-        )
-    story_rows = fresh_rows + pipeline_rows
-
-    story_idioms = [
-        {"id": r["id"], "phrase": r["phrase"], "meaning": r["meaning"],
-         "viet": r["vietnamese_equiv"] or "",
-         "register": _register_line(r, inline=True)}
-        for r in story_rows
-    ]
-    idiom_ids_str = ",".join(str(i["id"]) for i in story_idioms)
-    phrases_str = "\n".join(
-        f'• "{i["phrase"]}"'
-        + (f' — {i["viet"]}' if i["viet"] and i["viet"] != "—" else "")
-        + i.get("register", "")
-        for i in story_idioms
-    )
-
-    daily_story = ""
-    story_vi = ""
-    try:
-        daily_story = generate_daily_story(story_idioms, client)
-        if daily_story:
-            story_vi = translate_to_vietnamese(daily_story, client, idioms=story_idioms)
-            with db.connect(config.DB_PATH) as conn:
-                db.save_daily_story(conn, today.isoformat(), daily_story, phrases_str, story_vi, idiom_ids_str)
-    except Exception as e:
-        logger.error("Failed to generate daily story: %s", e)
 
     # Look up what was sent in the last 2 days for each user to avoid same-set repeats
     recent_cutoff = (today - timedelta(days=2)).isoformat()
@@ -629,6 +712,17 @@ async def send_daily_quiz(application: Application) -> None:
         except Exception as e:
             logger.error("Daily quiz: build failed for user %s: %s", chat_id, e)
             continue
+
+        # Built per user, in its own try block: a story failure must not cost
+        # this user their quiz.
+        daily_story = story_vi = phrases_str = ""
+        try:
+            with db.connect(config.DB_PATH) as conn:
+                daily_story, story_vi, phrases_str = _build_story_for(
+                    conn, chat_id, today, client
+                )
+        except Exception as e:
+            logger.error("Daily story: build failed for user %s: %s", chat_id, e)
 
         if not questions:
             logger.warning("Daily quiz: no questions for user %s", chat_id)
@@ -826,13 +920,13 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
         max_tokens = 600
 
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=config.CONTENT_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
 
-    answer = resp.content[0].text.strip() if resp.content else "Sorry, I couldn't process that."
+    answer = config.response_text(resp) or "Sorry, I couldn't process that."
     await msg.reply_text(answer)
 
 
@@ -873,6 +967,7 @@ async def _send_production_followup(chat_id: int, idiom_id: int, phrase: str,
             conn, chat_id, sent.message_id, idiom_id, phrase,
             turn_number=turn_number, used_situations=new_used,
         )
+        db.log_question_msg(conn, chat_id, sent.message_id, idiom_id, "production")
 
 
 async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYPE, prod: dict, user_sentence: str) -> bool:
@@ -896,7 +991,7 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=config.GRADER_MODEL,
             max_tokens=300,
             messages=[{"role": "user", "content": PRODUCTION_EVAL_PROMPT.format(
                 phrase=phrase, meaning=meaning, sentence=user_sentence,
@@ -918,7 +1013,7 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return False
 
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
 
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
     result_line = lines[0].upper() if lines else ""
@@ -969,6 +1064,86 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
+FEEDBACK_PREFIXES = ("!", "fix:", "sai:")
+
+
+def _feedback_body(text: str) -> str | None:
+    """The complaint in a feedback reply, or None if this is not one.
+
+    "sai" is Vietnamese for wrong, so a report can be raised in either language.
+    """
+    stripped = (text or "").strip()
+    for prefix in FEEDBACK_PREFIXES:
+        if stripped.lower().startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return None
+
+
+async def _handle_content_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   idiom_id: int, complaint: str) -> None:
+    """Send a reported content problem to Claude and apply the correction."""
+    import anthropic
+    from anthropic import Anthropic
+
+    msg = update.message
+    chat_id = msg.chat_id
+    if not complaint:
+        await msg.reply_text(
+            "Tell me what's wrong after the prefix — e.g. "
+            "\"! the Vietnamese is a word-for-word gloss, not a real idiom\"."
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    with db.connect(config.DB_PATH) as conn:
+        idiom = db.get_idiom(conn, idiom_id)
+    if idiom is None:
+        await msg.reply_text("Couldn't find that idiom any more.")
+        return
+
+    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    try:
+        resp = client.messages.create(
+            model=config.CONTENT_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": CONTENT_FIX_PROMPT.format(
+                phrase=idiom["phrase"],
+                meaning=idiom["meaning"] or "",
+                vietnamese_equiv=idiom["vietnamese_equiv"] or "",
+                example=idiom["example"] or "",
+                story=idiom["story"] or "",
+                complaint=complaint,
+            )}],
+        )
+    except (anthropic.APIError, anthropic.APIConnectionError) as e:
+        logger.warning("Content fix failed for idiom %s: %s", idiom_id, e)
+        await msg.reply_text("⚠️ Couldn't reach the editor right now. Try again in a moment.")
+        return
+
+    raw = config.response_text(resp)
+    updates, note = _parse_content_fix(raw)
+
+    if not updates:
+        await msg.reply_text(f"📝 No change made.\n\n{note or raw}")
+        return
+
+    lines = [f"✏️ Updated *{idiom['phrase']}*", ""]
+    with db.connect(config.DB_PATH) as conn:
+        for field, value in updates.items():
+            old_value = idiom[field] or ""
+            if value == old_value:
+                continue
+            db.apply_content_fix(conn, idiom_id, field, value)
+            db.log_content_fix(conn, chat_id, idiom_id, complaint, field, old_value, value)
+            lines.append(f"*{field}*")
+            lines.append(f"− {old_value}")
+            lines.append(f"+ {value}")
+            lines.append("")
+    if note:
+        lines.append(note)
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     if not msg or not msg.reply_to_message:
@@ -979,6 +1154,21 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     replied_id = msg.reply_to_message.message_id
     chat_id = msg.chat_id
+
+    # A feedback prefix wins over every other reading of the reply: on a
+    # production question the same text would otherwise be graded as an answer.
+    complaint = _feedback_body(msg.text or "")
+    if complaint is not None:
+        with db.connect(config.DB_PATH) as conn:
+            anchor = db.get_question_msg(conn, chat_id, replied_id)
+        if anchor is None:
+            await msg.reply_text(
+                "I can't tell which idiom that's about — reply to the question "
+                "message itself and I'll fix it."
+            )
+            return
+        await _handle_content_feedback(update, context, anchor["idiom_id"], complaint)
+        return
 
     # Check if this is a reply to a production question — peek DB, then clear only on success.
     with db.connect(config.DB_PATH) as conn:
@@ -1029,7 +1219,7 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=config.CONTENT_MODEL,
         max_tokens=300,
         system=(
             "You are an English idiom tutor in a Telegram quiz bot. The user replied to a bot message "
@@ -1047,7 +1237,7 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         }],
     )
 
-    answer = resp.content[0].text.strip() if resp.content else "Sorry, I couldn't process that."
+    answer = config.response_text(resp) or "Sorry, I couldn't process that."
     await msg.reply_text(answer)
 
 

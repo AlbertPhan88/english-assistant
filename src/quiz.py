@@ -3,7 +3,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
-from . import db
+from . import config, db
 
 
 @dataclass
@@ -301,13 +301,13 @@ def _generate_situation(phrase: str, meaning: str, avoid: list[str]) -> str:
             "Do NOT repeat these already-used scenarios: " + " || ".join(avoid) + "."
         ) if avoid else "Come up with something fresh."
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=config.BULK_MODEL,
             max_tokens=90,
             messages=[{"role": "user", "content": SITUATION_PROMPT.format(
                 phrase=phrase, meaning=meaning, avoid_clause=avoid_clause,
             )}],
         )
-        text = resp.content[0].text.strip() if resp.content else ""
+        text = config.response_text(resp)
         # Take first non-empty line, strip quotes/prefix
         for line in text.splitlines():
             line = line.strip().strip('"').strip("'").strip()

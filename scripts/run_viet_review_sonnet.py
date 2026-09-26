@@ -46,7 +46,7 @@ def review_strict(phrase: str, meaning: str, viet: str, client: Anthropic) -> st
                 messages=[{"role": "user", "content": REVIEW_VIET_PROMPT.format(
                     phrase=phrase, meaning=meaning, viet=viet)}],
             )
-            raw = resp.content[0].text.strip() if resp.content else ""
+            raw = config.response_text(resp)
             # Take first non-empty line, strip quotes/dashes
             result = next(
                 (l.strip().strip('"').lstrip("—").strip() for l in raw.splitlines() if l.strip()),

@@ -1,6 +1,6 @@
 from anthropic import Anthropic
 
-from . import db
+from . import config, db
 from .db import THEME_ORDER
 
 
@@ -281,13 +281,13 @@ def _parse_response(text: str) -> tuple[str, str]:
     return example, viet
 
 
-def generate_funny_example(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> tuple[str, str]:
+def generate_funny_example(phrase: str, meaning: str, client: Anthropic, model: str = config.BULK_MODEL) -> tuple[str, str]:
     resp = client.messages.create(
         model=model,
         max_tokens=200,
         messages=[{"role": "user", "content": FUNNY_PROMPT.format(phrase=phrase, meaning=meaning)}],
     )
-    raw = resp.content[0].text if resp.content else ""
+    raw = config.response_text(resp)
     return _parse_response(raw)
 
 
@@ -305,13 +305,13 @@ def fill_missing_examples(db_path: str, client: Anthropic) -> int:
     return filled
 
 
-def generate_story(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def generate_story(phrase: str, meaning: str, client: Anthropic, model: str = config.BULK_MODEL) -> str:
     resp = client.messages.create(
         model=model,
         max_tokens=200,
         messages=[{"role": "user", "content": STORY_PROMPT.format(phrase=phrase, meaning=meaning)}],
     )
-    return resp.content[0].text.strip() if resp.content else ""
+    return config.response_text(resp)
 
 
 def fill_missing_stories(db_path: str, client: Anthropic) -> int:
@@ -334,7 +334,7 @@ def translate_to_vietnamese(
     text: str,
     client: Anthropic,
     idioms: list[dict] | None = None,
-    model: str = "claude-sonnet-4-6",
+    model: str = config.CONTENT_MODEL,
     edit: bool = True,
 ) -> str:
     if idioms:
@@ -349,7 +349,7 @@ def translate_to_vietnamese(
         max_tokens=800,
         messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text, idiom_map=idiom_map)}],
     )
-    translation = resp.content[0].text.strip() if resp.content else ""
+    translation = config.response_text(resp)
     if edit and translation:
         translation = edit_vietnamese_story(text, translation, client, model=model)
     return translation
@@ -359,7 +359,7 @@ def edit_vietnamese_story(
     source: str,
     translation: str,
     client: Anthropic,
-    model: str = "claude-sonnet-4-6",
+    model: str = config.CONTENT_MODEL,
 ) -> str:
     """Second-pass editor: smooth out calques and awkward phrasing in a Vietnamese translation."""
     resp = client.messages.create(
@@ -367,39 +367,39 @@ def edit_vietnamese_story(
         max_tokens=900,
         messages=[{"role": "user", "content": EDITOR_PROMPT.format(source=source, translation=translation)}],
     )
-    edited = resp.content[0].text.strip() if resp.content else ""
+    edited = config.response_text(resp)
     return edited or translation
 
 
-def generate_daily_story(idioms: list[dict], client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def generate_daily_story(idioms: list[dict], client: Anthropic, model: str = config.BULK_MODEL) -> str:
     idiom_list = "\n".join(f"- {i['phrase']} ({i['meaning']})" for i in idioms)
     resp = client.messages.create(
         model=model,
         max_tokens=400,
         messages=[{"role": "user", "content": DAILY_STORY_PROMPT.format(idiom_list=idiom_list)}],
     )
-    return resp.content[0].text.strip() if resp.content else ""
+    return config.response_text(resp)
 
 
-def generate_vietnamese_equiv(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def generate_vietnamese_equiv(phrase: str, meaning: str, client: Anthropic, model: str = config.BULK_MODEL) -> str:
     resp = client.messages.create(
         model=model,
         max_tokens=100,
         messages=[{"role": "user", "content": VIET_EQUIV_PROMPT.format(phrase=phrase, meaning=meaning)}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     # Take first non-empty line only
     result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
     return result if result and result != "—" else ""
 
 
-def review_vietnamese_equiv(phrase: str, meaning: str, viet: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def review_vietnamese_equiv(phrase: str, meaning: str, viet: str, client: Anthropic, model: str = config.BULK_MODEL) -> str:
     resp = client.messages.create(
         model=model,
         max_tokens=80,
         messages=[{"role": "user", "content": REVIEW_VIET_PROMPT.format(phrase=phrase, meaning=meaning, viet=viet)}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
     # Reject explanations: too long, contains explanation words, or is empty/dash
     if not result or result == "—" or len(result) > 80 or any(w in result for w in ("là ", "được ", "nhưng ", "tuy ")):
@@ -442,7 +442,7 @@ def fill_missing_vietnamese(db_path: str, client: Anthropic) -> int:
     return filled
 
 
-def tag_themes_batch(batch: list, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> dict[int, str]:
+def tag_themes_batch(batch: list, client: Anthropic, model: str = config.BULK_MODEL) -> dict[int, str]:
     """Tag up to 20 idioms with a theme in one API call. Returns {id: theme}."""
     theme_list_str = ", ".join(THEME_LIST)
     idiom_lines = "\n".join(f"{row['id']}. {row['phrase']} — {row['meaning']}" for row in batch)
@@ -452,7 +452,7 @@ def tag_themes_batch(batch: list, client: Anthropic, model: str = "claude-haiku-
         max_tokens=400,
         messages=[{"role": "user", "content": prompt}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     results = {}
     for line in raw.splitlines():
         line = line.strip()
@@ -499,7 +499,7 @@ def _parse_register_line(line: str) -> tuple[int, str] | None:
 
 
 def tag_register_batch(batch: list, client: Anthropic,
-                       model: str = "claude-haiku-4-5-20251001") -> dict[int, str]:
+                       model: str = config.BULK_MODEL) -> dict[int, str]:
     """Tag up to 20 idioms for tone and register in one call. Returns {id: json}."""
     idiom_lines = "\n".join(
         f"{row['id']}. {row['phrase']} — {row['meaning']}" for row in batch
@@ -509,7 +509,7 @@ def tag_register_batch(batch: list, client: Anthropic,
         max_tokens=1000,
         messages=[{"role": "user", "content": TAG_REGISTER_PROMPT.format(idiom_lines=idiom_lines)}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     wanted = {row["id"] for row in batch}
     results = {}
     for line in raw.splitlines():
@@ -541,23 +541,23 @@ def tag_all_themes(db_path: str, client: Anthropic) -> int:
     return tagged
 
 
-def generate_extra_example(phrase: str, meaning: str, client: Anthropic, model: str = "claude-haiku-4-5-20251001") -> str:
+def generate_extra_example(phrase: str, meaning: str, client: Anthropic, model: str = config.BULK_MODEL) -> str:
     resp = client.messages.create(
         model=model,
         max_tokens=100,
         messages=[{"role": "user", "content": EXTRA_EXAMPLE_PROMPT.format(phrase=phrase, meaning=meaning)}],
     )
-    raw = resp.content[0].text.strip() if resp.content else ""
+    raw = config.response_text(resp)
     return next((l.strip() for l in raw.splitlines() if l.strip()), "")
 
 
-def generate_extra_story(phrase: str, meaning: str, existing_story: str, client: Anthropic, model: str = "claude-sonnet-4-6") -> str:
+def generate_extra_story(phrase: str, meaning: str, existing_story: str, client: Anthropic, model: str = config.CONTENT_MODEL) -> str:
     resp = client.messages.create(
         model=model,
         max_tokens=200,
         messages=[{"role": "user", "content": EXTRA_STORY_PROMPT.format(phrase=phrase, meaning=meaning, existing_story=existing_story or "none")}],
     )
-    return resp.content[0].text.strip() if resp.content else ""
+    return config.response_text(resp)
 
 
 def fill_extra_examples(db_path: str, client: Anthropic, target: int = 5) -> int:

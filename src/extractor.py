@@ -5,7 +5,7 @@ from pathlib import Path
 import pdfplumber
 from anthropic import Anthropic
 
-from . import db
+from . import config, db
 
 
 EXTRACT_PROMPT = """You are extracting English idioms from teaching slides.
@@ -61,7 +61,8 @@ def _parse_json_array(raw: str) -> list[dict]:
         return []
 
 
-def extract_idioms(text: str, client: Anthropic, model: str = "claude-sonnet-4-6") -> list[dict]:
+def extract_idioms(text: str, client: Anthropic, model: str | None = None) -> list[dict]:
+    model = model or config.CONTENT_MODEL
     found: list[dict] = []
     for chunk in _chunk(text):
         resp = client.messages.create(
@@ -69,7 +70,7 @@ def extract_idioms(text: str, client: Anthropic, model: str = "claude-sonnet-4-6
             max_tokens=4096,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=chunk)}],
         )
-        raw = resp.content[0].text if resp.content else ""
+        raw = config.response_text(resp)
         found.extend(_parse_json_array(raw))
     seen, deduped = set(), []
     for item in found:

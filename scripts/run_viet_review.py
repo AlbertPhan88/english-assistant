@@ -49,7 +49,7 @@ def review_with_retry(phrase: str, meaning: str, viet: str, client: Anthropic) -
                 messages=[{"role": "user", "content": REVIEW_VIET_PROMPT.format(
                     phrase=phrase, meaning=meaning, viet=viet)}],
             )
-            raw = resp.content[0].text.strip() if resp.content else ""
+            raw = config.response_text(resp)
             result = next((l.strip().strip('"') for l in raw.splitlines() if l.strip()), "")
             if (not result or result == "—" or len(result) > 80
                     or any(w in result for w in ("là ", "được ", "nhưng ", "tuy "))):

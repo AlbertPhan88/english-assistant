@@ -60,11 +60,13 @@ CREATE TABLE IF NOT EXISTS reask_queue (
 );
 
 CREATE TABLE IF NOT EXISTS daily_stories (
-    date      TEXT PRIMARY KEY,
+    user_id   INTEGER NOT NULL DEFAULT 0,
+    date      TEXT NOT NULL,
     story     TEXT NOT NULL,
     phrases   TEXT NOT NULL,
     story_vi  TEXT,
-    idiom_ids TEXT
+    idiom_ids TEXT,
+    PRIMARY KEY (user_id, date)
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -166,6 +168,47 @@ def _migrate_settings_to_multiuser(conn) -> None:
     conn.execute("DROP TABLE app_settings_old")
 
 
+def _migrate_stories_to_multiuser(conn) -> None:
+    """Give daily_stories a user_id, copying each story to every user who was
+    registered when it was sent.
+
+    Stories used to be keyed by date alone: one story was generated from the
+    first user's pipeline and broadcast to everyone, and the story-introduced
+    quiz bucket read the table globally. Fanning the history out per user
+    preserves what each existing user actually saw, while a user who joined
+    later correctly has no story history at all.
+    """
+    rows = list(conn.execute(
+        "SELECT date, story, phrases, story_vi, idiom_ids FROM daily_stories"
+    ))
+    users = list(conn.execute("SELECT chat_id, registered FROM users"))
+    conn.execute("ALTER TABLE daily_stories RENAME TO daily_stories_old")
+    conn.execute(
+        """CREATE TABLE daily_stories (
+            user_id   INTEGER NOT NULL DEFAULT 0,
+            date      TEXT NOT NULL,
+            story     TEXT NOT NULL,
+            phrases   TEXT NOT NULL,
+            story_vi  TEXT,
+            idiom_ids TEXT,
+            PRIMARY KEY (user_id, date)
+        )"""
+    )
+    for row in rows:
+        for user in users:
+            # registered is a timestamp; a story dated on or after the day the
+            # user joined is one they were sent.
+            if row["date"] >= (user["registered"] or "")[:10]:
+                conn.execute(
+                    """INSERT OR IGNORE INTO daily_stories(
+                         user_id, date, story, phrases, story_vi, idiom_ids
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (user["chat_id"], row["date"], row["story"], row["phrases"],
+                     row["story_vi"], row["idiom_ids"]),
+                )
+    conn.execute("DROP TABLE daily_stories_old")
+
+
 def _migrate(conn) -> None:
     # Migrate reviews to composite (user_id, idiom_id) PK if needed
     rev_info = conn.execute("PRAGMA table_info(reviews)").fetchall()
@@ -232,6 +275,35 @@ def _migrate(conn) -> None:
         "ON production_answers(chat_id, answered_at)"
     )
 
+    # message_id -> idiom_id for every question sent, so a reply can be traced
+    # back to its idiom whatever the question type. production_cache only covers
+    # production questions, and the in-memory stem cache dies with the process.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS question_msg (
+            chat_id    INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            idiom_id   INTEGER NOT NULL,
+            kind       TEXT NOT NULL DEFAULT '',
+            sent_at    TEXT NOT NULL,
+            PRIMARY KEY (chat_id, message_id)
+        )"""
+    )
+
+    # Content corrections raised by users, with the before state kept so a bad
+    # fix can be traced or undone.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS content_fixes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER NOT NULL,
+            idiom_id    INTEGER NOT NULL,
+            complaint   TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            old_value   TEXT,
+            new_value   TEXT,
+            applied_at  TEXT NOT NULL
+        )"""
+    )
+
     # Per-day log of sent questions so evening quiz can avoid morning duplicates.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS question_sent (
@@ -262,6 +334,8 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN story_vi TEXT")
     if "idiom_ids" not in ds_cols:
         conn.execute("ALTER TABLE daily_stories ADD COLUMN idiom_ids TEXT")
+    if "user_id" not in ds_cols:
+        _migrate_stories_to_multiuser(conn)
 
     # Create and seed idiom_examples / idiom_stories pools (once)
     conn.execute(
@@ -536,17 +610,36 @@ def pop_reasks(conn, chat_id: int, n: int) -> list[sqlite3.Row]:
     return rows
 
 
-def save_daily_story(conn, date_str: str, story: str, phrases: str, story_vi: str = "", idiom_ids: str = "") -> None:
+def save_daily_story(conn, user_id: int, date_str: str, story: str, phrases: str,
+                     story_vi: str = "", idiom_ids: str = "") -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO daily_stories(date, story, phrases, story_vi, idiom_ids) VALUES (?, ?, ?, ?, ?)",
-        (date_str, story, phrases, story_vi, idiom_ids),
+        """INSERT OR REPLACE INTO daily_stories(
+             user_id, date, story, phrases, story_vi, idiom_ids
+           ) VALUES (?, ?, ?, ?, ?, ?)""",
+        (user_id, date_str, story, phrases, story_vi, idiom_ids),
     )
 
 
-def get_daily_story(conn, date_str: str) -> sqlite3.Row | None:
+def get_daily_story(conn, user_id: int, date_str: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT story, phrases, story_vi, idiom_ids FROM daily_stories WHERE date = ?", (date_str,)
+        "SELECT story, phrases, story_vi, idiom_ids FROM daily_stories "
+        "WHERE user_id = ? AND date = ?",
+        (user_id, date_str),
     ).fetchone()
+
+
+def _story_idiom_ids(conn, user_id: int) -> set[int]:
+    """Every idiom this user has met in one of their own daily stories."""
+    ids: set[int] = set()
+    for row in conn.execute(
+        "SELECT idiom_ids FROM daily_stories WHERE user_id = ? AND idiom_ids != ''",
+        (user_id,),
+    ):
+        for tok in row[0].split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                ids.add(int(tok))
+    return ids
 
 
 def get_idioms_by_ids(conn, idiom_ids_str: str) -> list[dict]:
@@ -752,6 +845,50 @@ def count_unanswered_production(conn, chat_id: int) -> int:
            WHERE p.chat_id = ? AND r.skipped = 0""",
         (chat_id,),
     ).fetchone()[0]
+
+
+def log_question_msg(conn, chat_id: int, message_id: int, idiom_id: int,
+                     kind: str) -> None:
+    from . import config
+    conn.execute(
+        """INSERT OR REPLACE INTO question_msg(
+             chat_id, message_id, idiom_id, kind, sent_at
+           ) VALUES (?, ?, ?, ?, ?)""",
+        (chat_id, message_id, idiom_id, kind, config.now_local().isoformat()),
+    )
+
+
+def get_question_msg(conn, chat_id: int, message_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT idiom_id, kind FROM question_msg "
+        "WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    ).fetchone()
+
+
+def prune_question_msg(conn, keep_days: int = 30) -> None:
+    """Drop message anchors older than `keep_days`; replies never arrive that late."""
+    from datetime import timedelta
+    from . import config
+    cutoff = (config.today_local() - timedelta(days=keep_days)).isoformat()
+    conn.execute("DELETE FROM question_msg WHERE sent_at < ?", (cutoff,))
+
+
+def log_content_fix(conn, chat_id: int, idiom_id: int, complaint: str,
+                    field: str, old_value: str | None, new_value: str) -> None:
+    from . import config
+    conn.execute(
+        """INSERT INTO content_fixes(
+             chat_id, idiom_id, complaint, field, old_value, new_value, applied_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (chat_id, idiom_id, complaint, field, old_value, new_value,
+         config.now_local().isoformat()),
+    )
+
+
+def apply_content_fix(conn, idiom_id: int, field: str, value: str) -> None:
+    """Write one corrected field. `field` must already be whitelisted by the caller."""
+    conn.execute(f"UPDATE idioms SET {field} = ? WHERE id = ?", (value, idiom_id))
 
 
 def log_question_sent(conn, chat_id: int, idiom_id: int, sent_date: str) -> None:
@@ -988,15 +1125,7 @@ def never_in_story_idioms(conn, n: int, exclude_ids: list[int], user_id: int) ->
     """Phase-0 idioms that have NEVER appeared in any daily story. Used to seed
     fresh material into the daily story so the introduction pipeline keeps flowing.
     Prefers idioms with a Vietnamese translation so the story bullet list is useful."""
-    story_id_set: set[int] = set()
-    for row in conn.execute("SELECT idiom_ids FROM daily_stories WHERE idiom_ids != ''"):
-        for tok in row[0].split(","):
-            tok = tok.strip()
-            if tok:
-                try:
-                    story_id_set.add(int(tok))
-                except ValueError:
-                    pass
+    story_id_set = _story_idiom_ids(conn, user_id)
     excluded = set(exclude_ids) | story_id_set
     ex_placeholders = ",".join("?" * len(excluded)) if excluded else "NULL"
     return list(conn.execute(
@@ -1017,16 +1146,7 @@ def story_introduced_idioms(conn, n: int, exclude_ids: list[int], user_id: int) 
     exposed to the phrase + Vietnamese at least once. Even months-old exposure
     counts: re-encountering an old story idiom is a recall opportunity.
     These feed back into the boot pipeline as forward (MC) quizzes."""
-    # Collect distinct idiom_ids from daily_stories.idiom_ids (comma-separated)
-    story_id_set: set[int] = set()
-    for row in conn.execute("SELECT idiom_ids FROM daily_stories WHERE idiom_ids != ''"):
-        for tok in row[0].split(","):
-            tok = tok.strip()
-            if tok:
-                try:
-                    story_id_set.add(int(tok))
-                except ValueError:
-                    pass
+    story_id_set = _story_idiom_ids(conn, user_id)
     if not story_id_set:
         return []
     story_ids = sorted(story_id_set)
