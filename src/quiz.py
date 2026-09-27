@@ -199,7 +199,13 @@ def build_reverse_question(conn, idiom_row: sqlite3.Row, user_id: int = 0) -> Qu
     # Rotate through story pool, fall back to column then example
     story = db.get_next_story(conn, idiom_row["id"], user_id)
     if not story:
-        story = idiom_row["story"] or idiom_row["example"] or meaning
+        story = idiom_row["story"] or idiom_row["example"] or ""
+
+    # The options are meanings, one of them correct, so a context that restates
+    # the meaning hands over the answer. Falling back to the meaning itself used
+    # to do exactly that. Raise instead: _build_one moves on to another type.
+    if not story or meaning.strip().lower() in story.strip().lower():
+        raise ValueError(f"Idiom {phrase!r} has no context that isn't its own meaning.")
 
     distractors = db.random_distractor_meanings(conn, idiom_row["id"], 3)
     if len(distractors) < 3:
