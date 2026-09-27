@@ -185,15 +185,108 @@ async def _send_question(chat_id: int, q: Question, context: ContextTypes.DEFAUL
             del _stem_cache[next(iter(_stem_cache))]
 
 
+DENIED_TEXT = (
+    "This bot is invite-only right now, so there's nothing here for you yet. "
+    "If you were expecting access, ask whoever sent you the link."
+)
+
+
+def _is_admin(chat_id: int) -> bool:
+    return config.ADMIN_CHAT_ID != 0 and chat_id == config.ADMIN_CHAT_ID
+
+
+async def _deny_if_blocked(update: Update) -> bool:
+    """Tell the user access is denied and return True when it is.
+
+    Every handler calls this first, button taps included: blocking only the
+    scheduled sends would still let a stranger pull unlimited content with
+    /quiz, or grade answers by tapping buttons on questions sent earlier.
+    """
+    chat_id = update.effective_chat.id
+    with db.connect(config.DB_PATH) as conn:
+        blocked = db.is_blocked(conn, chat_id)
+    if not blocked:
+        return False
+    if update.callback_query:
+        await update.callback_query.answer(DENIED_TEXT, show_alert=True)
+    elif update.message:
+        await update.message.reply_text(DENIED_TEXT)
+    return True
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    chat_id = update.effective_chat.id
     with db.connect(config.DB_PATH) as conn:
-        db.register_user(conn, user.id, user.username)
+        known = db.is_blocked(conn, chat_id) or chat_id in db.all_users(conn)
+        # New arrivals start blocked while invite-only is on. A repeat /start
+        # from an existing user must not change their state either way.
+        db.register_user(conn, chat_id, user.username, blocked=config.INVITE_ONLY)
+        blocked = db.is_blocked(conn, chat_id)
+
+    if blocked:
+        await update.message.reply_text(DENIED_TEXT)
+        if not known and config.ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=config.ADMIN_CHAT_ID,
+                    text=(f"🔔 Access request: {user.first_name} "
+                          f"@{user.username or '—'} (`{chat_id}`)\n"
+                          f"Allow with /allow {chat_id}"),
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning("Couldn't notify admin of %s: %s", chat_id, e)
+        return
+
     await update.message.reply_text(
         f"Hi {user.first_name}!\n\n"
         "I'll send you 15 idiom quizzes every day at 6 AM.\n"
         "Type /quiz anytime for an extra set, /stats to see your progress."
     )
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: list users and their access state."""
+    if not _is_admin(update.effective_chat.id):
+        return
+    with db.connect(config.DB_PATH) as conn:
+        rows = db.list_users(conn)
+    lines = ["👥 *Users*", ""]
+    for r in rows:
+        mark = "🚫" if r["blocked"] else "✅"
+        lines.append(
+            f"{mark} `{r['chat_id']}` @{r['username'] or '—'} "
+            f"· joined {(r['registered'] or '')[:10]}"
+        )
+    lines.append("")
+    lines.append("/allow <id> · /block <id>")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _set_access(update: Update, blocked: bool) -> None:
+    if not _is_admin(update.effective_chat.id):
+        return
+    args = update.message.text.split()[1:]
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /allow <chat_id> or /block <chat_id>")
+        return
+    target = int(args[0])
+    with db.connect(config.DB_PATH) as conn:
+        ok = db.set_blocked(conn, target, blocked)
+    verb = "blocked" if blocked else "allowed"
+    await update.message.reply_text(
+        f"{'🚫' if blocked else '✅'} {target} {verb}." if ok
+        else f"No user with id {target}."
+    )
+
+
+async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _set_access(update, blocked=False)
+
+
+async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _set_access(update, blocked=True)
 
 
 def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
@@ -220,6 +313,8 @@ def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
 
 
 async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     chat_id = update.effective_chat.id
     n = 5
     if context.args:
@@ -253,6 +348,8 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     user_id = update.effective_user.id
     with db.connect(config.DB_PATH) as conn:
         total = conn.execute("SELECT COUNT(*) FROM idioms").fetchone()[0]
@@ -294,6 +391,8 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     prioritised on the next run — it just sits. This drains that pile on demand,
     freshest first, a few at a time.
     """
+    if await _deny_if_blocked(update):
+        return
     from .quiz import build_production_question
 
     chat_id = update.effective_chat.id
@@ -333,6 +432,8 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     chat_id = update.effective_chat.id
     today = config.today_local().isoformat()
     with db.connect(config.DB_PATH) as conn:
@@ -391,6 +492,8 @@ async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     await update.message.reply_text(
         "/start  — register\n"
         "/quiz   — get 5 questions now\n"
@@ -410,6 +513,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     chat_id = update.effective_chat.id
     with db.connect(config.DB_PATH) as conn:
         rows = db.list_skipped(conn, chat_id)
@@ -430,6 +535,8 @@ async def cmd_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_unskip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text(
@@ -487,13 +594,29 @@ def _reveal_context(idiom, cached) -> str:
     return "\n\n" + (idiom["story"] or idiom["example"] or idiom["meaning"])
 
 
+async def _set_markup(query, markup) -> None:
+    """Replace a message's buttons, ignoring "not modified".
+
+    Telegram rejects an edit that changes nothing, which a repeat tap produces.
+    That is not a failure worth raising — the markup already says what we want.
+    """
+    from telegram.error import BadRequest
+    try:
+        await query.edit_message_reply_markup(reply_markup=markup)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     query = update.callback_query
     await query.answer()
 
     parts = query.data.split(":")
     if len(parts) != 4 or parts[0] != "ans":
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _set_markup(query, None)
         return
 
     idiom_id = int(parts[1])
@@ -502,6 +625,9 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     chat_id = query.message.chat_id
     with db.connect(config.DB_PATH) as conn:
+        # Claim first: a second tap must not grade the same question twice.
+        if not db.claim_question(conn, chat_id, query.message.message_id):
+            return
         idiom = db.get_idiom(conn, idiom_id)
         quality = 5 if chosen == correct_index else 2
         db.apply_review(conn, idiom_id, quality, chat_id)
@@ -529,9 +655,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{meaning}{viet_line}{register_line}{context_line}"
         )
 
-    await query.edit_message_reply_markup(
-        reply_markup=_skip_only_keyboard(idiom_id)
-    )
+    await _set_markup(query, _skip_only_keyboard(idiom_id))
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=reply,
@@ -545,6 +669,8 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     Graded as a miss, exactly like a wrong choice: guessing at random to move on
     would otherwise feed SM-2 correct answers the user never actually knew.
     """
+    if await _deny_if_blocked(update):
+        return
     query = update.callback_query
     parts = query.data.split(":")
     if len(parts) != 2 or parts[0] != "dunno":
@@ -557,6 +683,10 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message_id = query.message.message_id
 
     with db.connect(config.DB_PATH) as conn:
+        # Same claim as handle_answer: giving up counts as one attempt, and a
+        # question already answered must not be re-graded as a miss.
+        if not db.claim_question(conn, chat_id, message_id):
+            return
         idiom = db.get_idiom(conn, idiom_id)
         pending = db.get_production_pending(conn, chat_id, message_id)
         # Follow-up production turns are bonus practice, so they leave the SM-2
@@ -580,9 +710,7 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{idiom['meaning']}{viet_line}{_register_line(idiom)}{context_line}"
     )
 
-    await query.edit_message_reply_markup(
-        reply_markup=_skip_only_keyboard(idiom_id)
-    )
+    await _set_markup(query, _skip_only_keyboard(idiom_id))
     await context.bot.send_message(
         chat_id=chat_id,
         text=reply,
@@ -591,6 +719,8 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     query = update.callback_query
     parts = query.data.split(":")
     if len(parts) != 2 or parts[0] != "skip":
@@ -609,7 +739,7 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     phrase = idiom["phrase"] if idiom else f"#{idiom_id}"
     await query.answer(f"Skipped: {phrase}. Use /unskip {idiom_id} to undo.")
-    await query.edit_message_reply_markup(reply_markup=None)
+    await _set_markup(query, None)
     # Also clear from production cache and re-ask queue so it doesn't keep coming back
     with db.connect(config.DB_PATH) as conn:
         db.clear_production_pending(conn, chat_id, query.message.message_id)
@@ -888,6 +1018,8 @@ async def send_weekly_review(application: Application) -> None:
 
 
 async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     msg = update.message
     if not msg or not msg.text:
         return
@@ -1145,6 +1277,8 @@ async def _handle_content_feedback(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _deny_if_blocked(update):
+        return
     msg = update.message
     if not msg or not msg.reply_to_message:
         return
@@ -1187,6 +1321,10 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 db.clear_production_pending_upto(
                     conn, chat_id, pending["idiom_id"], replied_id
                 )
+                # Settle the message so "Don't know" on it can't re-grade as a
+                # miss. Not claimed before grading: a transient grader failure
+                # invites the user to reply again.
+                db.mark_question_answered(conn, chat_id, replied_id)
         return
 
     user_question = msg.text or ""
@@ -1306,6 +1444,9 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler(["help", "h"], cmd_help))
     application.add_handler(CommandHandler("skipped", cmd_skipped))
     application.add_handler(CommandHandler("unskip", cmd_unskip))
+    application.add_handler(CommandHandler("users", cmd_users))
+    application.add_handler(CommandHandler("allow", cmd_allow))
+    application.add_handler(CommandHandler("block", cmd_block))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
     application.add_handler(CallbackQueryHandler(handle_dunno, pattern=r"^dunno:"))
     application.add_handler(CallbackQueryHandler(handle_skip, pattern=r"^skip:"))

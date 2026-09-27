@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS reviews (
 CREATE TABLE IF NOT EXISTS users (
     chat_id     INTEGER PRIMARY KEY,
     username    TEXT,
+    blocked     INTEGER NOT NULL DEFAULT 0,
     registered  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -285,9 +286,15 @@ def _migrate(conn) -> None:
             idiom_id   INTEGER NOT NULL,
             kind       TEXT NOT NULL DEFAULT '',
             sent_at    TEXT NOT NULL,
+            answered   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, message_id)
         )"""
     )
+    qm_cols = {row[1] for row in conn.execute("PRAGMA table_info(question_msg)")}
+    if "answered" not in qm_cols:
+        conn.execute(
+            "ALTER TABLE question_msg ADD COLUMN answered INTEGER NOT NULL DEFAULT 0"
+        )
 
     # Content corrections raised by users, with the before state kept so a bad
     # fix can be traced or undone.
@@ -328,6 +335,10 @@ def _migrate(conn) -> None:
         # Tone and register tags, stored as one JSON object. See
         # examples.REGISTER_AXES for the axes and their allowed values.
         conn.execute("ALTER TABLE idioms ADD COLUMN register TEXT")
+
+    u_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    if "blocked" not in u_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
 
     ds_cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_stories)")}
     if "story_vi" not in ds_cols:
@@ -410,10 +421,16 @@ def idioms_missing_vietnamese(conn) -> list[sqlite3.Row]:
     ))
 
 
-def register_user(conn, chat_id: int, username: str | None) -> None:
+def register_user(conn, chat_id: int, username: str | None,
+                  blocked: bool = False) -> None:
+    """Register a user, seeding a review row per idiom.
+
+    `blocked` applies to genuinely new users only; an existing user's state is
+    never changed by a repeat /start.
+    """
     conn.execute(
-        "INSERT OR IGNORE INTO users(chat_id, username) VALUES (?, ?)",
-        (chat_id, username),
+        "INSERT OR IGNORE INTO users(chat_id, username, blocked) VALUES (?, ?, ?)",
+        (chat_id, username, 1 if blocked else 0),
     )
     # Create review rows for all existing idioms this user doesn't have yet
     conn.execute(
@@ -424,7 +441,36 @@ def register_user(conn, chat_id: int, username: str | None) -> None:
 
 
 def all_users(conn) -> list[int]:
-    return [row["chat_id"] for row in conn.execute("SELECT chat_id FROM users")]
+    """Chat ids that scheduled sends should reach — blocked users excluded."""
+    return [
+        row["chat_id"]
+        for row in conn.execute("SELECT chat_id FROM users WHERE blocked = 0")
+    ]
+
+
+def is_blocked(conn, chat_id: int) -> bool:
+    """True when the user exists and is blocked.
+
+    An unknown chat_id is not blocked: /start gates new registrations itself.
+    """
+    row = conn.execute(
+        "SELECT blocked FROM users WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return bool(row and row["blocked"])
+
+
+def set_blocked(conn, chat_id: int, blocked: bool) -> bool:
+    cur = conn.execute(
+        "UPDATE users SET blocked = ? WHERE chat_id = ?",
+        (1 if blocked else 0, chat_id),
+    )
+    return cur.rowcount > 0
+
+
+def list_users(conn) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT chat_id, username, registered, blocked FROM users ORDER BY registered"
+    ))
 
 
 def idioms_missing_example(conn) -> list[sqlite3.Row]:
@@ -864,6 +910,36 @@ def get_question_msg(conn, chat_id: int, message_id: int) -> sqlite3.Row | None:
         "WHERE chat_id = ? AND message_id = ?",
         (chat_id, message_id),
     ).fetchone()
+
+
+def claim_question(conn, chat_id: int, message_id: int) -> bool:
+    """Claim a question as answered. True for the first caller only.
+
+    Telegram delivers a callback per tap, so a double tap on an answer button
+    arrives as two updates. Grading both would apply the SM-2 transition twice.
+    The UPDATE is the lock: SQLite serializes it, so exactly one caller sees a
+    row change.
+    """
+    cur = conn.execute(
+        "UPDATE question_msg SET answered = 1 "
+        "WHERE chat_id = ? AND message_id = ? AND answered = 0",
+        (chat_id, message_id),
+    )
+    return cur.rowcount > 0
+
+
+def mark_question_answered(conn, chat_id: int, message_id: int) -> None:
+    """Close a question without gating on the claim.
+
+    Production answers arrive as replies and are deliberately retryable — a
+    transient grader failure tells the user to reply again — so that path must
+    not claim up front. Once a grade lands, though, the question is settled and
+    must not be re-gradable by pressing "Don't know" on the same message.
+    """
+    conn.execute(
+        "UPDATE question_msg SET answered = 1 WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    )
 
 
 def prune_question_msg(conn, keep_days: int = 30) -> None:

@@ -25,6 +25,15 @@ EVENING_IDIOM_COUNT: int = int(os.getenv("EVENING_IDIOM_COUNT", "15"))
 STORY_IDIOM_COUNT: int = int(os.getenv("STORY_IDIOM_COUNT", "15"))
 DB_PATH: str = os.getenv("DB_PATH", "data/idioms.db")
 
+# --- Access control ---
+# ADMIN_CHAT_ID may manage access with /users, /allow and /block, and is told
+# when someone new tries to register.
+ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID", "0"))
+# With INVITE_ONLY on, a new /start registers the user but leaves them blocked
+# until the admin allows them, so a stranger who finds the bot gets nothing.
+# Existing users are unaffected — their blocked flag is whatever it already is.
+INVITE_ONLY: bool = os.getenv("INVITE_ONLY", "1") not in ("0", "false", "False", "")
+
 # --- Models ---
 # Three tiers by what the call is for, each overridable from .env.
 #   CONTENT  — learner-facing prose: stories, translations, tutor replies,
