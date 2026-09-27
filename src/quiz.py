@@ -1,9 +1,12 @@
+import logging
 import random
 import re
 import sqlite3
 from dataclasses import dataclass, field
 
 from . import config, db
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -268,16 +271,8 @@ def build_completion_question(conn, idiom_row: sqlite3.Row) -> Question:
     )
 
 
-# Static fallback situations — used if the LLM call fails.
-_SITUATIONS = [
-    "chatting with a friend",
-    "at work discussing a problem",
-    "texting someone about something uncomfortable",
-    "talking to your boss or teacher",
-    "during a disagreement with someone",
-    "catching up with a colleague",
-    "in a group conversation",
-]
+# Hard cap on a situation, so one long line is trimmed rather than thrown away.
+_SITUATION_MAX_CHARS = 400
 
 
 SITUATION_PROMPT = """Invent ONE concrete, specific situation for a learner to use the English idiom "{phrase}" (meaning: {meaning}).
@@ -291,42 +286,63 @@ Rules:
 Output only the situation text on a single line. No quotes, no headers, no "Situation:" prefix."""
 
 
-def _generate_situation(phrase: str, meaning: str, avoid: list[str]) -> str:
-    """Ask Claude for one concrete scenario. Falls back to a static one on failure."""
+def _generate_situation(phrase: str, meaning: str, avoid: list[str]) -> str | None:
+    """Ask Claude for one concrete scenario, or None if it could not produce one.
+
+    Returns None rather than a generic stand-in. A production question asks the
+    learner to recall the idiom a situation calls for, so a vague situation makes
+    the question unanswerable — "in a group conversation" fits every idiom in the
+    database. Callers skip the question instead.
+    """
+    from anthropic import Anthropic
+    from . import config
     try:
-        from anthropic import Anthropic
-        from . import config
         client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
         avoid_clause = (
             "Do NOT repeat these already-used scenarios: " + " || ".join(avoid) + "."
         ) if avoid else "Come up with something fresh."
         resp = client.messages.create(
             model=config.BULK_MODEL,
-            max_tokens=90,
+            max_tokens=250,
             messages=[{"role": "user", "content": SITUATION_PROMPT.format(
                 phrase=phrase, meaning=meaning, avoid_clause=avoid_clause,
             )}],
         )
         text = config.response_text(resp)
-        # Take first non-empty line, strip quotes/prefix
-        for line in text.splitlines():
-            line = line.strip().strip('"').strip("'").strip()
-            for prefix in ("Situation:", "Scenario:"):
-                if line.lower().startswith(prefix.lower()):
-                    line = line[len(prefix):].strip()
-            if line and len(line) < 250:
-                return line
-    except Exception:
-        pass
-    # Fallback: pick a static situation that isn't in `avoid`
-    remaining = [s for s in _SITUATIONS if s not in avoid]
-    return random.choice(remaining or _SITUATIONS)
+    except Exception as e:
+        logger.warning("Situation generation failed for %r: %s", phrase, e)
+        return None
+
+    for line in text.splitlines():
+        line = line.strip().strip('"').strip("'").strip()
+        for prefix in ("Situation:", "Scenario:"):
+            if line.lower().startswith(prefix.lower()):
+                line = line[len(prefix):].strip()
+        if not line:
+            continue
+        # Trim an over-long line at the last sentence end rather than discarding
+        # it. A slightly long situation still teaches; a generic one does not.
+        if len(line) > _SITUATION_MAX_CHARS:
+            cut = line[:_SITUATION_MAX_CHARS]
+            stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+            line = cut[:stop + 1] if stop > 80 else cut.rstrip() + "…"
+        return line
+
+    logger.warning(
+        "Situation generation returned no usable line for %r: stop=%s raw=%r",
+        phrase, resp.stop_reason, text[:200],
+    )
+    return None
 
 
 def build_production_question(conn, idiom_row: sqlite3.Row, avoid_situations: list[str] | None = None) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
     situation = _generate_situation(phrase, meaning, avoid_situations or [])
+    if situation is None:
+        # Let _build_one fall through to a multiple-choice question for this
+        # idiom rather than asking one with no usable situation.
+        raise ValueError(f"No situation available for idiom {idiom_row['id']}")
     viet = idiom_row["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
     stem = (

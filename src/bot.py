@@ -1123,6 +1123,11 @@ async def _send_production_followup(chat_id: int, idiom_id: int, phrase: str,
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
 
     situation = _generate_situation(phrase, meaning, used_situations)
+    if situation is None:
+        # Skip the bonus turn rather than ask one with no usable situation. The
+        # first turn already scored; extra drills are optional.
+        logger.warning("Skipping follow-up turn for %r: no situation", phrase)
+        return
 
     stem = (
         f"🔁 Turn {turn_number}/{MULTI_TURN_MAX} — same idiom, new situation.\n\n"
