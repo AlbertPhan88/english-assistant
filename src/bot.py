@@ -59,9 +59,15 @@ FIXABLE_FIELDS = {
 }
 
 CONTENT_FIX_PROMPT = """You maintain an English-idiom study database for a Vietnamese learner.
-They have reported a problem with one entry. Correct it.
+They have reported something while looking at a quiz question. Work out what they
+mean, then decide whether the stored entry is actually wrong.
 
-Current entry:
+The quiz question they were looking at:
+---
+{question}
+---
+
+The stored entry:
 phrase: {phrase}
 meaning: {meaning}
 vietnamese_equiv: {vietnamese_equiv}
@@ -70,25 +76,40 @@ story: {story}
 
 Their report: "{complaint}"
 
-Decide which fields are actually wrong and rewrite only those. Output one line per
-field you are changing, in this exact format:
+First decide what the report is about. Only a problem with one of the five stored
+fields above is something you can fix. These are NOT fixable here, and for any of
+them you must change nothing:
+- the generated question itself — a missing, confusing, or repeated situation,
+  the wrong question type, the wording of the prompt
+- the grading of their answer
+- a request to change many entries at once, or to scan the whole database
+- anything about the bot's behaviour rather than this entry's content
+
+Output format. For each stored field that is genuinely wrong:
 
 FIELD: <field name>
 VALUE: <the corrected value, on one line>
 
-Repeat the pair for each field. Field names must be exactly one of:
-phrase, meaning, vietnamese_equiv, example, story
+Field names must be exactly one of: phrase, meaning, vietnamese_equiv, example, story
 
 Then one final line:
-NOTE: <one sentence telling the learner what you changed and why>
+NOTE: <one sentence to the learner>
+
+If nothing should change — the report is about something unfixable above, the entry
+is already correct, or you cannot tell what they mean — output only:
+FIELD: none
+NOTE: <one sentence saying plainly what you understood and why nothing changed>
 
 Rules:
-- Change as little as possible. If the report is about the meaning, do not rewrite the story too.
-- If their report is mistaken and the entry is already correct, output only:
-  FIELD: none
-  NOTE: <one sentence explaining why the current entry is right>
+- Default to changing nothing. Only rewrite a field when the report clearly
+  identifies something wrong with that field's current value.
+- Never rewrite a field just to have something to show. An entry that is already
+  good must be left exactly as it is.
+- Change as little as possible: a report about the meaning does not license
+  rewriting the story.
 - example and story must contain the phrase verbatim (or a natural inflection).
-- vietnamese_equiv must be natural Vietnamese, not a word-for-word gloss.
+- vietnamese_equiv must be idiomatic Vietnamese as a Vietnamese speaker would say
+  it, not a word-for-word gloss or an explanation.
 - Keep each value on a single line. No markdown, no quotes around values."""
 
 
@@ -431,6 +452,29 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_question(chat_id, q, context)
 
 
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Revert the most recent content fix, whole."""
+    if await _deny_if_blocked(update):
+        return
+    chat_id = update.effective_chat.id
+    with db.connect(config.DB_PATH) as conn:
+        fixes = db.last_content_fixes(conn, chat_id)
+        if not fixes:
+            await update.message.reply_text("Nothing to undo — no content fix on record.")
+            return
+        lines = ["↩️ Reverted", ""]
+        for f in fixes:
+            db.revert_content_fix(
+                conn, f["id"], f["idiom_id"], f["field"], f["old_value"]
+            )
+            lines.append(f"*{f['field']}*")
+            lines.append(f"− {f['new_value']}")
+            lines.append(f"+ {f['old_value']}")
+            lines.append("")
+        lines.append(f"_from: {fixes[0]['complaint'][:120]}_")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _deny_if_blocked(update):
         return
@@ -506,7 +550,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/help   — this message\n\n"
         "Spot a mistake? Reply to the question with ! and what's wrong —\n"
         "e.g. \"! the Vietnamese is a literal gloss, not a real idiom\".\n"
-        "\"fix:\" and \"sai:\" work too. I'll correct the entry and show the diff.\n\n"
+        "\"fix:\" and \"sai:\" work too. I'll correct the entry and show the diff,\n"
+        "or explain why nothing changed. /undo reverts my last fix.\n\n"
         "Tone & register key — when an idiom is sayable:\n"
         + register_legend()
     )
@@ -1229,8 +1274,15 @@ def _feedback_body(text: str) -> str | None:
 
 
 async def _handle_content_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                   idiom_id: int, complaint: str) -> None:
-    """Send a reported content problem to Claude and apply the correction."""
+                                   idiom_id: int, complaint: str,
+                                   question_text: str = "") -> None:
+    """Send a reported content problem to Claude and apply any correction.
+
+    `question_text` is the message the user replied to. Without it a complaint
+    about the question itself — a missing situation, a confusing prompt — looks
+    like a complaint about the dictionary entry, and the editor invents a field
+    change to satisfy it.
+    """
     import anthropic
     from anthropic import Anthropic
 
@@ -1256,6 +1308,7 @@ async def _handle_content_feedback(update: Update, context: ContextTypes.DEFAULT
             model=config.CONTENT_MODEL,
             max_tokens=config.reply_budget(1500),
             messages=[{"role": "user", "content": CONTENT_FIX_PROMPT.format(
+                question=question_text.strip() or "(not available)",
                 phrase=idiom["phrase"],
                 meaning=idiom["meaning"] or "",
                 vietnamese_equiv=idiom["vietnamese_equiv"] or "",
@@ -1318,7 +1371,10 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "message itself and I'll fix it."
             )
             return
-        await _handle_content_feedback(update, context, anchor["idiom_id"], complaint)
+        await _handle_content_feedback(
+            update, context, anchor["idiom_id"], complaint,
+            question_text=msg.reply_to_message.text or "",
+        )
         return
 
     # Check if this is a reply to a production question — peek DB, then clear only on success.
@@ -1407,6 +1463,7 @@ def run(db_path: str) -> None:
             BotCommand("quiz", "Get 5 questions now (/quiz N for more)"),
             BotCommand("p", "Unanswered production questions (alias /pending)"),
             BotCommand("pending", "Work through unanswered production questions"),
+            BotCommand("undo", "Revert my last content fix"),
             BotCommand("s", "Today's story (alias /story)"),
             BotCommand("story", "Today's idiom story"),
             BotCommand("stats", "See your progress"),
@@ -1456,6 +1513,7 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler(["quiz", "q"], cmd_quiz))
     application.add_handler(CommandHandler(["pending", "p"], cmd_pending))
+    application.add_handler(CommandHandler("undo", cmd_undo))
     application.add_handler(CommandHandler(["story", "s"], cmd_story))
     application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
     application.add_handler(CommandHandler(["help", "h"], cmd_help))

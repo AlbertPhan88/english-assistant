@@ -307,9 +307,15 @@ def _migrate(conn) -> None:
             field       TEXT NOT NULL,
             old_value   TEXT,
             new_value   TEXT,
-            applied_at  TEXT NOT NULL
+            applied_at  TEXT NOT NULL,
+            reverted    INTEGER NOT NULL DEFAULT 0
         )"""
     )
+    cf_cols = {row[1] for row in conn.execute("PRAGMA table_info(content_fixes)")}
+    if "reverted" not in cf_cols:
+        conn.execute(
+            "ALTER TABLE content_fixes ADD COLUMN reverted INTEGER NOT NULL DEFAULT 0"
+        )
 
     # Per-day log of sent questions so evening quiz can avoid morning duplicates.
     conn.execute(
@@ -960,6 +966,35 @@ def log_content_fix(conn, chat_id: int, idiom_id: int, complaint: str,
         (chat_id, idiom_id, complaint, field, old_value, new_value,
          config.now_local().isoformat()),
     )
+
+
+def last_content_fixes(conn, chat_id: int) -> list[sqlite3.Row]:
+    """The fields changed by this user's most recent, not-yet-reverted fix.
+
+    One report can rewrite several fields, and undoing half of it would leave the
+    entry in a state neither the editor nor the user chose — so a fix is grouped
+    by the second it was applied and reverted whole.
+    """
+    row = conn.execute(
+        "SELECT MAX(applied_at) FROM content_fixes WHERE chat_id = ? AND reverted = 0",
+        (chat_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    return list(conn.execute(
+        "SELECT id, idiom_id, field, old_value, new_value, complaint "
+        "FROM content_fixes WHERE chat_id = ? AND reverted = 0 AND applied_at = ?",
+        (chat_id, row[0]),
+    ))
+
+
+def revert_content_fix(conn, fix_id: int, idiom_id: int, field: str,
+                       old_value: str | None) -> None:
+    """Put a field back and mark the fix reverted, keeping it in the history."""
+    conn.execute(
+        f"UPDATE idioms SET {field} = ? WHERE id = ?", (old_value, idiom_id)
+    )
+    conn.execute("UPDATE content_fixes SET reverted = 1 WHERE id = ?", (fix_id,))
 
 
 def apply_content_fix(conn, idiom_id: int, field: str, value: str) -> None:
