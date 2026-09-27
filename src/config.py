@@ -43,6 +43,12 @@ INVITE_ONLY: bool = os.getenv("INVITE_ONLY", "1") not in ("0", "false", "False",
 #   BULK     — high-volume batch tagging where the output is a short label.
 # Sonnet 5 costs the same per token as Sonnet 4.6 ($3/$15 per 1M), so the
 # content tier is a free upgrade. Haiku 4.5 stays the cheapest at $1/$5.
+# Reasoning models spend part of max_tokens on thinking before writing a word,
+# so a budget sized for the visible reply alone gets truncated — and a truncated
+# reply arrives as an empty text block, not an error. Every call on a reasoning
+# tier adds this headroom on top of the room its answer needs.
+THINKING_HEADROOM: int = int(os.getenv("THINKING_HEADROOM", "1200"))
+
 CONTENT_MODEL: str = os.getenv("CONTENT_MODEL", "claude-sonnet-5")
 GRADER_MODEL: str = os.getenv("GRADER_MODEL", "claude-sonnet-5")
 BULK_MODEL: str = os.getenv("BULK_MODEL", "claude-haiku-4-5")
@@ -55,6 +61,11 @@ def now_local() -> datetime:
 
 def today_local() -> date:
     return datetime.now(TZ).date()
+
+
+def reply_budget(visible_tokens: int) -> int:
+    """max_tokens for a call whose visible answer needs `visible_tokens`."""
+    return visible_tokens + THINKING_HEADROOM
 
 
 def response_text(resp) -> str:

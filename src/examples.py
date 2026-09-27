@@ -346,7 +346,7 @@ def translate_to_vietnamese(
         idiom_map = "(none available)"
     resp = client.messages.create(
         model=model,
-        max_tokens=800,
+        max_tokens=config.reply_budget(800),
         messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text, idiom_map=idiom_map)}],
     )
     translation = config.response_text(resp)
@@ -364,7 +364,7 @@ def edit_vietnamese_story(
     """Second-pass editor: smooth out calques and awkward phrasing in a Vietnamese translation."""
     resp = client.messages.create(
         model=model,
-        max_tokens=900,
+        max_tokens=config.reply_budget(900),
         messages=[{"role": "user", "content": EDITOR_PROMPT.format(source=source, translation=translation)}],
     )
     edited = config.response_text(resp)
@@ -554,7 +554,7 @@ def generate_extra_example(phrase: str, meaning: str, client: Anthropic, model: 
 def generate_extra_story(phrase: str, meaning: str, existing_story: str, client: Anthropic, model: str = config.CONTENT_MODEL) -> str:
     resp = client.messages.create(
         model=model,
-        max_tokens=200,
+        max_tokens=config.reply_budget(200),
         messages=[{"role": "user", "content": EXTRA_STORY_PROMPT.format(phrase=phrase, meaning=meaning, existing_story=existing_story or "none")}],
     )
     return config.response_text(resp)

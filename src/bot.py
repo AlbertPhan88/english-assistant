@@ -1053,7 +1053,7 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=max_tokens,
+        max_tokens=config.reply_budget(max_tokens),
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -1124,7 +1124,7 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         resp = client.messages.create(
             model=config.GRADER_MODEL,
-            max_tokens=300,
+            max_tokens=config.reply_budget(300),
             messages=[{"role": "user", "content": PRODUCTION_EVAL_PROMPT.format(
                 phrase=phrase, meaning=meaning, sentence=user_sentence,
             )}],
@@ -1146,11 +1146,25 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
         return False
 
     raw = config.response_text(resp)
-
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
     result_line = lines[0].upper() if lines else ""
-    feedback = "\n".join(lines[1:]) if len(lines) > 1 else raw
 
+    # A reply that carries no verdict is a failed call, not a wrong answer.
+    # Reasoning models can spend the whole budget thinking and return an empty
+    # text block with stop_reason max_tokens; treating that as INCORRECT scored
+    # a miss against the user and showed them a bare ❌ with no feedback.
+    if not (result_line.startswith("CORRECT") or result_line.startswith("INCORRECT")):
+        logger.warning(
+            "Production eval unusable for idiom %s: stop=%s out_tokens=%s raw=%r",
+            idiom_id, resp.stop_reason, resp.usage.output_tokens, raw[:200],
+        )
+        await update.message.reply_text(
+            "⚠️ The grader didn't come back with a verdict. Reply again to retry — "
+            "this doesn't count against you."
+        )
+        return False
+
+    feedback = "\n".join(lines[1:]) if len(lines) > 1 else ""
     correct = result_line.startswith("CORRECT")
     # Only advance SM-2 state on the FIRST turn; follow-up drills should not
     # push the SRS interval further (extra reps beyond the first are bonus practice).
@@ -1172,6 +1186,9 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     icon = "✅" if correct else "❌"
+    if not feedback:
+        feedback = ("Correct." if correct
+                    else f'Not quite — the idiom is "{phrase}".')
     register_line = _register_line(idiom) if idiom else ""
     await update.message.reply_text(f"{icon} {feedback}{register_line}")
 
@@ -1237,7 +1254,7 @@ async def _handle_content_feedback(update: Update, context: ContextTypes.DEFAULT
     try:
         resp = client.messages.create(
             model=config.CONTENT_MODEL,
-            max_tokens=1500,
+            max_tokens=config.reply_budget(1500),
             messages=[{"role": "user", "content": CONTENT_FIX_PROMPT.format(
                 phrase=idiom["phrase"],
                 meaning=idiom["meaning"] or "",
@@ -1358,7 +1375,7 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=300,
+        max_tokens=config.reply_budget(300),
         system=(
             "You are an English idiom tutor in a Telegram quiz bot. The user replied to a bot message "
             "with a follow-up. Answer in the SAME compact style as the quiz grader:\n"
