@@ -64,8 +64,26 @@ def today_local() -> date:
 
 
 def reply_budget(visible_tokens: int) -> int:
-    """max_tokens for a call whose visible answer needs `visible_tokens`."""
+    """max_tokens for a call whose visible answer has a roughly fixed length."""
     return visible_tokens + THINKING_HEADROOM
+
+
+def rewrite_budget(source: str, multiple: float = 3.0) -> int:
+    """max_tokens for a call that rewrites `source` into something as long again.
+
+    Translating or editing a passage produces output proportional to its input,
+    and the thinking that precedes it scales the same way, so a fixed headroom
+    under-serves a long passage and truncates it. Vietnamese is diacritic-heavy
+    and runs well over the usual chars-per-token, so the estimate is deliberately
+    generous — these calls run twice a day, not in bulk.
+    """
+    est_tokens = len(source) / 2.0
+    return max(2000, int(est_tokens * multiple) + THINKING_HEADROOM)
+
+
+def was_truncated(resp) -> bool:
+    """True when the model ran out of budget mid-answer."""
+    return getattr(resp, "stop_reason", None) == "max_tokens"
 
 
 def response_text(resp) -> str:

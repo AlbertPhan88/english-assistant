@@ -808,6 +808,8 @@ def _build_story_for(conn, chat_id: int, today, client) -> tuple[str, str, str]:
     idioms — ones this user has never met in a story — to keep the introduction
     pipeline flowing.
     """
+    from .examples import generate_daily_story, translate_to_vietnamese
+
     fresh_slots = min(5, config.STORY_IDIOM_COUNT // 3)
     remaining_slots = config.STORY_IDIOM_COUNT - fresh_slots
     fresh_rows = db.never_in_story_idioms(conn, fresh_slots, [], chat_id)

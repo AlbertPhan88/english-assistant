@@ -1,7 +1,10 @@
+import logging
 from anthropic import Anthropic
 
 from . import config, db
 from .db import THEME_ORDER
+
+logger = logging.getLogger(__name__)
 
 
 THEME_LIST = THEME_ORDER
@@ -346,10 +349,16 @@ def translate_to_vietnamese(
         idiom_map = "(none available)"
     resp = client.messages.create(
         model=model,
-        max_tokens=config.reply_budget(800),
+        max_tokens=config.rewrite_budget(text),
         messages=[{"role": "user", "content": TRANSLATE_PROMPT.format(text=text, idiom_map=idiom_map)}],
     )
     translation = config.response_text(resp)
+    if config.was_truncated(resp):
+        logger.warning(
+            "Vietnamese translation truncated at %s tokens; returning it unedited",
+            resp.usage.output_tokens,
+        )
+        return translation
     if edit and translation:
         translation = edit_vietnamese_story(text, translation, client, model=model)
     return translation
@@ -364,10 +373,18 @@ def edit_vietnamese_story(
     """Second-pass editor: smooth out calques and awkward phrasing in a Vietnamese translation."""
     resp = client.messages.create(
         model=model,
-        max_tokens=config.reply_budget(900),
+        max_tokens=config.rewrite_budget(translation),
         messages=[{"role": "user", "content": EDITOR_PROMPT.format(source=source, translation=translation)}],
     )
     edited = config.response_text(resp)
+    # A truncated edit is worse than no edit: it silently drops the tail of the
+    # story. Polish is optional, completeness is not.
+    if config.was_truncated(resp):
+        logger.warning(
+            "Vietnamese editor truncated at %s tokens; keeping the unedited translation",
+            resp.usage.output_tokens,
+        )
+        return translation
     return edited or translation
 
 
