@@ -77,8 +77,11 @@ def rewrite_budget(source: str, multiple: float = 3.0) -> int:
     and runs well over the usual chars-per-token, so the estimate is deliberately
     generous — these calls run twice a day, not in bulk.
     """
+    # max_tokens is a ceiling, not a charge — only generated tokens are billed —
+    # so the estimate is deliberately loose. Measured on these stories, thinking
+    # alone runs 1000-1300 tokens and spikes higher, independently of length.
     est_tokens = len(source) / 2.0
-    return max(2000, int(est_tokens * multiple) + THINKING_HEADROOM)
+    return max(8000, int(est_tokens * multiple) + 4 * THINKING_HEADROOM)
 
 
 def was_truncated(resp) -> bool:
