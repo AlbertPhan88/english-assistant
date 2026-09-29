@@ -310,6 +310,15 @@ async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _set_access(update, blocked=True)
 
 
+def _prefs(conn, chat_id: int) -> dict:
+    """This user's session settings, falling back to the global defaults."""
+    return db.all_prefs(conn, chat_id, {
+        "daily_count": config.DAILY_IDIOM_COUNT,
+        "evening_count": config.EVENING_IDIOM_COUNT,
+        "production_per_session": config.PRODUCTION_PER_SESSION,
+    })
+
+
 def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
     """Pop up to `cap` missed idioms and rebuild each as the question type it is
     now due for.
@@ -356,7 +365,13 @@ async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 conn, config.today_local(), remaining + 5, chat_id,
                 extra_exclude_ids=reask_ids,
             )
-            new_questions = build_questions_from_rows(conn, rows, chat_id)[:remaining]
+            # Scale the cap to the size asked for, so /quiz 5 isn't all writing.
+            per_session = _prefs(conn, chat_id)["production_per_session"]
+            prod_cap = max(1, round(per_session * n / max(1, config.DAILY_IDIOM_COUNT)))
+            prod_cap -= sum(1 for q in reask_questions if q.kind == "production")
+            new_questions = build_questions_from_rows(
+                conn, rows, chat_id, max_production=max(0, prod_cap)
+            )[:remaining]
         else:
             new_questions = []
 
@@ -450,6 +465,30 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     for q in questions:
         await _send_question(chat_id, q, context)
+
+
+async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show or change this user's session settings."""
+    if await _deny_if_blocked(update):
+        return
+    chat_id = update.effective_chat.id
+    args = (update.message.text or "").split()[1:]
+
+    with db.connect(config.DB_PATH) as conn:
+        if len(args) >= 2 and args[0] in db.USER_PREFS and args[1].lstrip("-").isdigit():
+            value = max(0, min(int(args[1]), 60))
+            db.set_pref(conn, chat_id, args[0], value)
+            await update.message.reply_text(f"✅ {args[0]} = {value}")
+            return
+        prefs = _prefs(conn, chat_id)
+
+    lines = ["⚙️ *Your settings*", ""]
+    for key, why in db.USER_PREFS.items():
+        lines.append(f"`{key}` = *{prefs[key]}*")
+        lines.append(f"  {why}")
+    lines += ["", "Change one with `/set <name> <number>`",
+              "e.g. `/set production_per_session 3`"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -547,6 +586,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/stats  — see your progress\n"
         "/skipped — list idioms you've marked as known\n"
         "/unskip <id or phrase> — bring a skipped idiom back\n"
+        "/set    — your session settings (size, production limit)\n"
         "/help   — this message\n\n"
         "Spot a mistake? Reply to the question with ! and what's wrong —\n"
         "e.g. \"! the Vietnamese is a literal gloss, not a real idiom\".\n"
@@ -876,16 +916,22 @@ async def send_daily_quiz(application: Application) -> None:
                 ]
                 # Missed idioms lead the set. They take slots from the total
                 # rather than adding to it, so the session length is unchanged.
-                reasks = _build_reask_questions(
-                    conn, chat_id, max(1, config.DAILY_IDIOM_COUNT // 3)
-                )
-                remaining = config.DAILY_IDIOM_COUNT - len(reasks)
+                prefs = _prefs(conn, chat_id)
+                total = prefs["daily_count"]
+                reasks = _build_reask_questions(conn, chat_id, max(1, total // 3))
+                remaining = total - len(reasks)
                 rows = db.build_daily_rows(
                     conn, today, remaining + 10, chat_id,
                     extra_exclude_ids=recent_sent + [q.idiom_id for q in reasks],
                 )
-                questions = reasks + build_questions_from_rows(conn, rows, chat_id)
-            questions = questions[:config.DAILY_IDIOM_COUNT]
+                prod_left = max(
+                    0, prefs["production_per_session"]
+                    - sum(1 for q in reasks if q.kind == "production")
+                )
+                questions = reasks + build_questions_from_rows(
+                    conn, rows, chat_id, max_production=prod_left
+                )
+            questions = questions[:total]
         except Exception as e:
             logger.error("Daily quiz: build failed for user %s: %s", chat_id, e)
             continue
@@ -981,16 +1027,22 @@ async def send_evening_quiz(application: Application) -> None:
                 # Skip idioms already SENT today (regardless of whether user answered).
                 # Covers morning quiz + any /q, even if morning is still un-answered.
                 sent_today = db.get_sent_today(conn, chat_id, today_str)
-                reasks = _build_reask_questions(
-                    conn, chat_id, max(1, config.EVENING_IDIOM_COUNT // 3)
-                )
-                remaining = config.EVENING_IDIOM_COUNT - len(reasks)
+                prefs = _prefs(conn, chat_id)
+                total = prefs["evening_count"]
+                reasks = _build_reask_questions(conn, chat_id, max(1, total // 3))
+                remaining = total - len(reasks)
                 rows = db.build_daily_rows(
                     conn, today, remaining + 10, chat_id,
                     extra_exclude_ids=sent_today + [q.idiom_id for q in reasks],
                 )
-                questions = reasks + build_questions_from_rows(conn, rows, chat_id)
-            questions = questions[:config.EVENING_IDIOM_COUNT]
+                prod_left = max(
+                    0, prefs["production_per_session"]
+                    - sum(1 for q in reasks if q.kind == "production")
+                )
+                questions = reasks + build_questions_from_rows(
+                    conn, rows, chat_id, max_production=prod_left
+                )
+            questions = questions[:total]
             if not questions:
                 continue
             await application.bot.send_message(
@@ -1471,6 +1523,7 @@ def run(db_path: str) -> None:
             BotCommand("p", "Unanswered production questions (alias /pending)"),
             BotCommand("pending", "Work through unanswered production questions"),
             BotCommand("undo", "Revert my last content fix"),
+            BotCommand("set", "Show or change your session settings"),
             BotCommand("s", "Today's story (alias /story)"),
             BotCommand("story", "Today's idiom story"),
             BotCommand("stats", "See your progress"),
@@ -1521,6 +1574,7 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler(["quiz", "q"], cmd_quiz))
     application.add_handler(CommandHandler(["pending", "p"], cmd_pending))
     application.add_handler(CommandHandler("undo", cmd_undo))
+    application.add_handler(CommandHandler("set", cmd_set))
     application.add_handler(CommandHandler(["story", "s"], cmd_story))
     application.add_handler(CommandHandler(["stats", "stat"], cmd_stats))
     application.add_handler(CommandHandler(["help", "h"], cmd_help))

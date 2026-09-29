@@ -20,6 +20,11 @@ ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 DAILY_HOUR: int = int(os.getenv("DAILY_HOUR", "6"))
 EVENING_HOUR: int = int(os.getenv("EVENING_HOUR", "19"))
 DAILY_IDIOM_COUNT: int = int(os.getenv("DAILY_IDIOM_COUNT", "30"))
+# Ceiling on write-a-sentence questions per set. They cost far more effort than a
+# multiple-choice tap, so a set that fills up with them is exhausting even when
+# the question count is unchanged. 0 disables production entirely; a high value
+# restores the old behaviour of letting the rotation decide.
+PRODUCTION_PER_SESSION: int = int(os.getenv("PRODUCTION_PER_SESSION", "6"))
 EVENING_IDIOM_COUNT: int = int(os.getenv("EVENING_IDIOM_COUNT", "15"))
 # Daily story uses a smaller idiom count — Telegram messages are capped at 4096 chars.
 STORY_IDIOM_COUNT: int = int(os.getenv("STORY_IDIOM_COUNT", "15"))

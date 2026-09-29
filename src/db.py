@@ -1177,6 +1177,31 @@ def set_setting(conn, key: str, value: str, user_id: int = 0) -> None:
     )
 
 
+# Per-user tuning, stored in app_settings. Falling back to the config default
+# keeps an unset user on the global behaviour.
+USER_PREFS = {
+    "daily_count": "how many questions in the morning set",
+    "evening_count": "how many questions in the evening set",
+    "production_per_session": "most production (write-a-sentence) questions per set",
+}
+
+
+def get_pref(conn, user_id: int, key: str, default: int) -> int:
+    raw = get_setting(conn, key, "", user_id=user_id)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def set_pref(conn, user_id: int, key: str, value: int) -> None:
+    set_setting(conn, key, str(value), user_id=user_id)
+
+
+def all_prefs(conn, user_id: int, defaults: dict[str, int]) -> dict[str, int]:
+    return {k: get_pref(conn, user_id, k, v) for k, v in defaults.items()}
+
+
 # --- Clustered daily set helpers ---
 
 def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[sqlite3.Row]:

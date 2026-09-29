@@ -424,17 +424,29 @@ _KIND_BUILDERS = [
 _BOOT_KIND = [0, 2]
 
 
-def build_one(conn, row, user_id: int = 0) -> Question:
-    """Dispatch to the right question builder based on boot_phase or next_kind."""
+def build_one(conn, row, user_id: int = 0, allow_production: bool = True) -> Question:
+    """Dispatch to the right question builder based on boot_phase or next_kind.
+
+    With `allow_production` false the production builder is passed over and the
+    idiom gets the next type in its chain instead. The idiom still gets asked —
+    only the effort it demands changes — so a session keeps its question count.
+    """
     boot_phase = row["boot_phase"] if row["boot_phase"] is not None else -1
     if 0 <= boot_phase <= 2:
         if boot_phase == 2:
-            return build_production_question(conn, row)
-        kind_idx = _BOOT_KIND[boot_phase]
+            if allow_production:
+                return build_production_question(conn, row)
+            # Phase 2 has no chain of its own; reuse the reverse-slot chain so a
+            # boot idiom over the cap is still reviewed.
+            kind_idx = 2
+        else:
+            kind_idx = _BOOT_KIND[boot_phase]
     else:
         kind_idx = (row["next_kind"] or 0) % 5
 
     for builder in _KIND_BUILDERS[kind_idx]:
+        if builder is build_production_question and not allow_production:
+            continue
         try:
             sig = builder.__code__.co_varnames[:builder.__code__.co_argcount]
             if "user_id" in sig:
@@ -445,13 +457,25 @@ def build_one(conn, row, user_id: int = 0) -> Question:
     raise ValueError(f"Could not build any question for idiom {row['id']}")
 
 
-def build_questions_from_rows(conn, rows: list, user_id: int = 0) -> list[Question]:
+def build_questions_from_rows(conn, rows: list, user_id: int = 0,
+                              max_production: int | None = None) -> list[Question]:
+    """Build a question per row, capping how many demand a written sentence.
+
+    Production questions cost far more effort than a multiple-choice tap, so a
+    set that fills with them is exhausting at an unchanged question count. Rows
+    past the cap fall through to a cheaper type rather than being dropped.
+    """
     questions = []
+    produced = 0
     for row in rows:
+        allow = max_production is None or produced < max_production
         try:
-            questions.append(build_one(conn, row, user_id))
+            q = build_one(conn, row, user_id, allow_production=allow)
         except ValueError:
             continue
+        if q.kind == "production":
+            produced += 1
+        questions.append(q)
     return questions
 
 
