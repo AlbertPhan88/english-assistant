@@ -342,6 +342,14 @@ def _migrate(conn) -> None:
         # examples.REGISTER_AXES for the axes and their allowed values.
         conn.execute("ALTER TABLE idioms ADD COLUMN register TEXT")
 
+    r_cols = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if "prod_hint" not in r_cols:
+        # Set when a production question is missed, cleared when one is passed.
+        # Drives the fading cue: the retry shows the phrase's shape.
+        conn.execute(
+            "ALTER TABLE reviews ADD COLUMN prod_hint INTEGER NOT NULL DEFAULT 0"
+        )
+
     u_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
     if "blocked" not in u_cols:
         conn.execute("ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
@@ -1065,6 +1073,22 @@ def due_idioms(conn, today: date, limit: int, user_id: int) -> list[sqlite3.Row]
 # Index into quiz._KIND_BUILDERS for a production question. Slots 1 and 3 of the
 # SM-2 rotation are both production; 1 is the earlier of the two.
 PRODUCTION_KIND = 1
+
+
+def set_production_hint(conn, idiom_id: int, user_id: int, on: bool) -> None:
+    """Turn the fading cue on after a missed production question, off after a hit."""
+    conn.execute(
+        "UPDATE reviews SET prod_hint = ? WHERE user_id = ? AND idiom_id = ?",
+        (1 if on else 0, user_id, idiom_id),
+    )
+
+
+def wants_production_hint(conn, idiom_id: int, user_id: int) -> bool:
+    row = conn.execute(
+        "SELECT prod_hint FROM reviews WHERE user_id = ? AND idiom_id = ?",
+        (user_id, idiom_id),
+    ).fetchone()
+    return bool(row and row["prod_hint"])
 
 
 def apply_review(conn, idiom_id: int, quality: int, user_id: int) -> None:

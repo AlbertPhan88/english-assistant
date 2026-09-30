@@ -484,7 +484,7 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if idiom is None:
                 continue
             try:
-                questions.append(build_production_question(conn, idiom))
+                questions.append(build_production_question(conn, idiom, chat_id))
             except ValueError:
                 continue
 
@@ -816,6 +816,8 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if first_turn:
             db.apply_review(conn, idiom_id, 2, chat_id)
             db.add_reask(conn, chat_id, idiom_id)
+            if pending is not None:
+                db.set_production_hint(conn, idiom_id, chat_id, True)
         # The question is closed now, so stop waiting for a typed sentence —
         # including any older unanswered copy of the same idiom.
         db.clear_production_pending_upto(conn, chat_id, idiom_id, message_id)
@@ -1221,10 +1223,14 @@ async def _send_production_followup(chat_id: int, idiom_id: int, phrase: str,
         logger.warning("Skipping follow-up turn for %r: no situation", phrase)
         return
 
+    from .quiz import phrase_skeleton
+    with db.connect(config.DB_PATH) as conn:
+        hint = (f"\n\nShape: {phrase_skeleton(phrase)}"
+                if db.wants_production_hint(conn, idiom_id, chat_id) else "")
     stem = (
         f"🔁 Turn {turn_number}/{MULTI_TURN_MAX} — same idiom, new situation.\n\n"
         f"Meaning: {meaning}{viet_line}\n\n"
-        f"Situation: {situation}\n\n"
+        f"Situation: {situation}{hint}\n\n"
         "Recall the idiom that fits and use it in a sentence.\n\n"
         "Reply to this message with your sentence 👇"
     )
@@ -1319,6 +1325,10 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
             db.apply_review(conn, idiom_id, quality, user_id)
             if not correct:
                 db.add_reask(conn, update.message.chat_id, idiom_id)
+        if is_first_turn:
+            # Fade the cue in on a miss and out on a hit, so the next encounter
+            # sits one rung easier or harder than this one.
+            db.set_production_hint(conn, idiom_id, user_id, not correct)
         # Logged for every turn, and before any of it can be lost: grading
         # deletes the cache row, so the sentence and the verdict on it would
         # otherwise leave no trace to review.

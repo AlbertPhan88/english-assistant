@@ -341,7 +341,21 @@ def _generate_situation(phrase: str, meaning: str, avoid: list[str]) -> str | No
     return None
 
 
-def build_production_question(conn, idiom_row: sqlite3.Row, avoid_situations: list[str] | None = None) -> Question:
+def phrase_skeleton(phrase: str) -> str:
+    """First letter of each word, with the rest masked — "t·· t·· k···".
+
+    A retrieval cue, not the answer: it narrows a search across the whole
+    collection down to something recallable, while still requiring the learner
+    to produce the words.
+    """
+    return " ".join(
+        w[0] + "·" * (len(w) - 1) if len(w) > 1 else w
+        for w in phrase.split()
+    )
+
+
+def build_production_question(conn, idiom_row: sqlite3.Row, user_id: int = 0,
+                              avoid_situations: list[str] | None = None) -> Question:
     phrase = idiom_row["phrase"]
     meaning = idiom_row["meaning"]
     situation = _generate_situation(phrase, meaning, avoid_situations or [])
@@ -351,9 +365,14 @@ def build_production_question(conn, idiom_row: sqlite3.Row, avoid_situations: li
         raise ValueError(f"No situation available for idiom {idiom_row['id']}")
     viet = idiom_row["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
+    # Fading cue: shown only after this idiom was missed at production, and
+    # dropped again once it is passed.
+    hint_line = ""
+    if user_id and db.wants_production_hint(conn, idiom_row["id"], user_id):
+        hint_line = f"\n\nShape: {phrase_skeleton(phrase)}"
     stem = (
         f"Meaning: {meaning}{viet_line}\n\n"
-        f"Situation: {situation}\n\n"
+        f"Situation: {situation}{hint_line}\n\n"
         "Recall the idiom that fits and use it in a sentence."
     )
     return Question(
@@ -435,7 +454,7 @@ def build_one(conn, row, user_id: int = 0, allow_production: bool = True) -> Que
     if 0 <= boot_phase <= 2:
         if boot_phase == 2:
             if allow_production:
-                return build_production_question(conn, row)
+                return build_production_question(conn, row, user_id)
             # Phase 2 has no chain of its own; reuse the reverse-slot chain so a
             # boot idiom over the cap is still reviewed.
             kind_idx = 2
@@ -457,18 +476,47 @@ def build_one(conn, row, user_id: int = 0, allow_production: bool = True) -> Que
     raise ValueError(f"Could not build any question for idiom {row['id']}")
 
 
-def build_questions_from_rows(conn, rows: list, user_id: int = 0,
-                              max_production: int | None = None) -> list[Question]:
-    """Build a question per row, capping how many demand a written sentence.
+# An idiom answered right less than this share of the time is not secure enough
+# to be asked for unaided recall; it gets a recognition question instead.
+PRODUCTION_ACCURACY_GATE = 0.5
 
-    Production questions cost far more effort than a multiple-choice tap, so a
-    set that fills with them is exhausting at an unchanged question count. Rows
-    past the cap fall through to a cheaper type rather than being dropped.
+
+def production_ready(row) -> bool:
+    """Whether this idiom is secure enough to be worth asking for free recall.
+
+    Free recall across the whole collection is far harder than picking from four
+    options, so asking it of an idiom the learner keeps missing produces a near
+    certain failure — which costs an ease penalty and teaches nothing. Boot
+    phase 2 is exempt: that stage is where production is introduced.
+    """
+    if (row["boot_phase"] if row["boot_phase"] is not None else -1) == 2:
+        return True
+    ok = row["correct"] or 0
+    wrong = row["wrong"] or 0
+    if ok + wrong == 0:
+        return True  # never tested; no evidence against it
+    return ok / (ok + wrong) >= PRODUCTION_ACCURACY_GATE
+
+
+def build_questions_from_rows(conn, rows: list, user_id: int = 0,
+                              max_production: int | None = None,
+                              gate_production: bool = True) -> list[Question]:
+    """Build a question per row, limiting which demand a written sentence.
+
+    Two limits apply. A session cap, because production costs far more effort
+    than a multiple-choice tap and a set full of them is exhausting at an
+    unchanged question count. And a per-idiom gate, because unaided recall of an
+    idiom the learner has not secured just manufactures a failure.
+
+    Either way the row falls through to a cheaper type rather than being
+    dropped, and answering it still advances the rotation — so nothing parks.
     """
     questions = []
     produced = 0
     for row in rows:
         allow = max_production is None or produced < max_production
+        if allow and gate_production:
+            allow = production_ready(row)
         try:
             q = build_one(conn, row, user_id, allow_production=allow)
         except ValueError:
