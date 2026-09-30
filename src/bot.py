@@ -310,6 +310,42 @@ async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _set_access(update, blocked=True)
 
 
+# One admin alert per process per day: a billing failure hits every call in a
+# session, and 45 identical messages would be worse than none.
+_billing_alert_sent: set[str] = set()
+
+
+def _is_billing_error(exc: Exception) -> bool:
+    return "credit balance" in str(exc).lower()
+
+
+async def alert_admin_billing(bot, where: str) -> None:
+    """Tell the admin the API account is out of credits.
+
+    Without this the bot degrades in silence: multiple-choice questions still go
+    out because they need no API call, so a session looks normal while stories,
+    translations and production questions vanish.
+    """
+    if not config.ADMIN_CHAT_ID:
+        return
+    day = config.today_local().isoformat()
+    if day in _billing_alert_sent:
+        return
+    _billing_alert_sent.add(day)
+    try:
+        await bot.send_message(
+            chat_id=config.ADMIN_CHAT_ID,
+            text=("⚠️ The Anthropic API account is out of credits.\n\n"
+                  f"First hit: {where}.\n"
+                  "Stories, translations and production questions are unavailable "
+                  "until it is topped up. Multiple-choice questions still work, so "
+                  "sessions will look shorter rather than stopping.\n\n"
+                  "Top up: platform.claude.com/settings/billing"),
+        )
+    except Exception as e:
+        logger.warning("Couldn't send billing alert: %s", e)
+
+
 def _prefs(conn, chat_id: int) -> dict:
     """This user's session settings, falling back to the global defaults."""
     return db.all_prefs(conn, chat_id, {
@@ -946,6 +982,8 @@ async def send_daily_quiz(application: Application) -> None:
                 )
         except Exception as e:
             logger.error("Daily story: build failed for user %s: %s", chat_id, e)
+            if _is_billing_error(e):
+                await alert_admin_billing(application.bot, "generating the daily story")
 
         if not questions:
             logger.warning("Daily quiz: no questions for user %s", chat_id)
@@ -1235,8 +1273,9 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except anthropic.BadRequestError as e:
         err_msg = str(e)
-        if "credit balance" in err_msg.lower():
+        if _is_billing_error(e):
             user_msg = "⚠️ Couldn't grade — the API account is out of credits. Top up and reply again."
+            await alert_admin_billing(context.bot, "grading a production answer")
         else:
             user_msg = f"⚠️ Couldn't grade right now (API error). Reply again to retry."
         logger.warning("Production eval failed: %s", e)
