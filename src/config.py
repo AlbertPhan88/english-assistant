@@ -46,16 +46,20 @@ INVITE_ONLY: bool = os.getenv("INVITE_ONLY", "1") not in ("0", "false", "False",
 #   GRADER   — judges production answers. Its verdict drives SM-2 scheduling,
 #              so a wrong call costs real review time.
 #   BULK     — high-volume batch tagging where the output is a short label.
-# Sonnet 5 costs the same per token as Sonnet 4.6 ($3/$15 per 1M), so the
-# content tier is a free upgrade. Haiku 4.5 stays the cheapest at $1/$5.
+# Sonnet 5.5 is $2/$10 per 1M, under Sonnet 4.6's $3/$15, so the content tier is
+# both newer and cheaper than what this project started on. Haiku 4.5 at $1/$5 is
+# the cheapest model available and the only current Haiku; it also predates the
+# 4.7 tokenizer, so it bills fewer tokens for the same text than the Sonnet tiers.
+# The grader sits on Haiku because it is the highest-volume call here — one per
+# answered production question — and it matched Sonnet on the verdicts tested.
 # Reasoning models spend part of max_tokens on thinking before writing a word,
 # so a budget sized for the visible reply alone gets truncated — and a truncated
 # reply arrives as an empty text block, not an error. Every call on a reasoning
 # tier adds this headroom on top of the room its answer needs.
 THINKING_HEADROOM: int = int(os.getenv("THINKING_HEADROOM", "1200"))
 
-CONTENT_MODEL: str = os.getenv("CONTENT_MODEL", "claude-sonnet-5")
-GRADER_MODEL: str = os.getenv("GRADER_MODEL", "claude-sonnet-5")
+CONTENT_MODEL: str = os.getenv("CONTENT_MODEL", "claude-sonnet-5-5")
+GRADER_MODEL: str = os.getenv("GRADER_MODEL", "claude-haiku-4-5")
 BULK_MODEL: str = os.getenv("BULK_MODEL", "claude-haiku-4-5")
 TZ: ZoneInfo = ZoneInfo(os.getenv("TZ", "Asia/Ho_Chi_Minh"))
 
