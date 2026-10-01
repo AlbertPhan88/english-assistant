@@ -68,6 +68,46 @@ _IRREGULAR = {
     "throw": ["threw", "thrown", "throws", "throwing"],
     "win": ["won", "wins", "winning"],
     "write": ["wrote", "written", "writes", "writing"],
+    # Added for idiom_present: a verb whose past form is missing here reads as a
+    # missing idiom word, which would fail a correct answer.
+    "pay": ["paid", "pays", "paying"],
+    "teach": ["taught", "teaches", "teaching"],
+    "seek": ["sought", "seeks", "seeking"],
+    "feel": ["felt", "feels", "feeling"],
+    "sleep": ["slept", "sleeps", "sleeping"],
+    "mean": ["meant", "means", "meaning"],
+    "deal": ["dealt", "deals", "dealing"],
+    "bend": ["bent", "bends", "bending"],
+    "lend": ["lent", "lends", "lending"],
+    "spend": ["spent", "spends", "spending"],
+    "build": ["built", "builds", "building"],
+    "burn": ["burnt", "burned", "burns", "burning"],
+    "cast": ["casts", "casting"],
+    "cost": ["costs", "costing"],
+    "cut": ["cuts", "cutting"],
+    "hit": ["hits", "hitting"],
+    "let": ["lets", "letting"],
+    "put": ["puts", "putting"],
+    "set": ["sets", "setting"],
+    "shut": ["shuts", "shutting"],
+    "spread": ["spreads", "spreading"],
+    "beat": ["beaten", "beats", "beating"],
+    "blow": ["blew", "blown", "blows", "blowing"],
+    "draw": ["drew", "drawn", "draws", "drawing"],
+    "drive": ["drove", "driven", "drives", "driving"],
+    "fall": ["fell", "fallen", "falls", "falling"],
+    "fight": ["fought", "fights", "fighting"],
+    "grow": ["grew", "grown", "grows", "growing"],
+    "hang": ["hung", "hangs", "hanging"],
+    "rise": ["rose", "risen", "rises", "rising"],
+    "shed": ["sheds", "shedding"],
+    "shake": ["shook", "shaken", "shakes", "shaking"],
+    "strike": ["struck", "strikes", "striking"],
+    "swear": ["swore", "sworn", "swears", "swearing"],
+    "wear": ["wore", "worn", "wears", "wearing"],
+    "stick": ["stuck", "sticks", "sticking"],
+    "steal": ["stole", "stolen", "steals", "stealing"],
+    "tear": ["tore", "torn", "tears", "tearing"],
 }
 
 
@@ -129,6 +169,50 @@ def _blank(text: str, phrase: str) -> str:
 
     # No match found — caller should treat this as unusable
     return ""
+
+
+# Words the idiom may carry that a learner can reasonably drop or swap without
+# having got the idiom wrong.
+_IDIOM_OPTIONAL = {"a", "an", "the", "one's", "someone's", "somebody's",
+                   "someone", "somebody", "something", "oneself"}
+
+# An idiom's internal copula gets conjugated with the sentence — "strike while
+# the iron is hot" becomes "struck while the iron was hot" — so every form has
+# to count as the same word.
+_BE_FORMS = ["be", "is", "am", "are", "was", "were", "been", "being", "'s", "'re", "'m"]
+
+
+def _idiom_word_pattern(word: str) -> str:
+    """Match one idiom word in any inflection, wherever it sits in the phrase."""
+    low = word.lower()
+    if _PLACEHOLDER.match(word):
+        return r"\w+(?:'\w+)?"
+    if low in _MODALS:
+        return "(?:" + "|".join(re.escape(f) for f in [low] + _MODALS[low]) + ")"
+    if low in _BE_FORMS:
+        return "(?:" + "|".join(re.escape(f) for f in _BE_FORMS) + ")"
+    return _verb_alternation(word)
+
+
+def idiom_present(sentence: str, phrase: str) -> bool:
+    """Whether the idiom's own content words appear, in order, in the sentence.
+
+    Deterministic, because the grading model cannot reliably separate a missing
+    word of the idiom from a missing article: it passed "no such a free lunch",
+    where "thing" belongs to the idiom, as an article slip.
+
+    Up to two words may sit between consecutive idiom words, since many idioms
+    take an object inside them — "tide over" becomes "tides him over", "pay
+    respects" becomes "paid her respects". Order is still required, so a
+    reversed idiom does not match.
+    """
+    words = [w for w in phrase.split() if w.lower() not in _IDIOM_OPTIONAL]
+    if not words:
+        words = phrase.split()
+    parts = [_idiom_word_pattern(w) for w in words]
+    gap = r"(?:\s+\S+){0,2}\s+"
+    pattern = re.compile(parts[0] + "".join(gap + p for p in parts[1:]), re.IGNORECASE)
+    return bool(pattern.search(sentence))
 
 
 _STEM_STOPWORDS = {

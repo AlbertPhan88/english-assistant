@@ -14,7 +14,10 @@ from telegram.ext import (
 
 from . import config, db
 from .examples import register_legend
-from .quiz import Question, build_daily_set, build_one, build_question_from_story, build_questions_from_rows
+from .quiz import (
+    Question, build_daily_set, build_one, build_question_from_story,
+    build_questions_from_rows, idiom_present,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,25 +30,45 @@ _stem_cache: dict[int, tuple[str, str, list]] = {}
 # Production-question pending state is now persisted in DB (db.production_cache).
 # See db.save_production_pending / db.get_production_pending.
 
-PRODUCTION_EVAL_PROMPT = """You are an English teacher helping a Vietnamese learner practice using the English idiom "{phrase}".
+PRODUCTION_EVAL_PROMPT = """You are an English teacher helping a Vietnamese learner practise using the English idiom "{phrase}".
 
 Target idiom: "{phrase}"
 Meaning: {meaning}
 
 Their sentence: "{sentence}"
 
-The goal is that they LEARN THIS IDIOM. Every INCORRECT reply must show them how the idiom is actually used.
+You are marking ONE thing: did they retrieve this idiom and deploy it correctly?
+General English grammar elsewhere in the sentence is NOT what is being tested and
+must NOT change the verdict. Mention it separately so they still learn from it.
+
+Mark CORRECT when the sentence contains the target idiom — allowing natural
+inflection (tense, number, person) and the normal filling of slots like "one's",
+"someone", "something" — and uses it with the meaning given above.
+
+Mark INCORRECT only when the idiom itself is wrong:
+- a different idiom, or no idiom
+- the idiom's own wording altered: a wrong or swapped word, a wrong preposition,
+  a missing word of the idiom, the words in the wrong order
+- the idiom used with a meaning it does not have, or read literally when it is
+  figurative
+
+Do NOT mark INCORRECT for: subject-verb agreement, articles, plurals, tense, word
+order or spelling OUTSIDE the idiom's own words; punctuation; currency or number
+formatting; an otherwise clumsy but intelligible sentence.
 
 Respond in EXACTLY this format — keep it tight:
 Line 1: CORRECT or INCORRECT
-Line 2: ONE short sentence of feedback. If INCORRECT, briefly say what went wrong (wrong meaning, wrong idiom, wrong grammar, etc.).
+Line 2: ONE short sentence on the idiom itself.
 Line 3: If INCORRECT, "Example: <one natural sentence that uses the target idiom \"{phrase}\" correctly>". If CORRECT, skip this line.
-Line 4: "Similar: <1-3 close idioms>" — list 1 to 3 DIFFERENT English idioms with similar meaning, comma-separated. Do NOT list variants of the target idiom itself. Skip this line only if no good similar idioms exist.
+Line 4: ONLY if their sentence has a real grammar problem outside the idiom, "Note: <the fix, under 15 words>". Omit this line entirely when the sentence is already fine — never write a Note that says nothing is wrong, and never contradict yourself in it.
+Line 5: "Similar: <1-3 close idioms>" — list 1 to 3 DIFFERENT English idioms with similar meaning, comma-separated. Do NOT list variants of the target idiom itself. Skip this line only if no good similar idioms exist.
 
 Rules:
 - The Example line MUST include the target idiom "{phrase}" verbatim (or its natural inflected form, e.g. tense change).
+- Never give an Example that is the learner's own sentence back to them. If their
+  sentence already uses the idiom correctly, the verdict is CORRECT.
 - Be honest but not preachy. No encouragement filler. No apologies.
-- Do NOT exceed 4 lines total."""
+- Do NOT exceed 5 lines total."""
 
 
 # Fields a content fix may rewrite. Anything outside this set is ignored, so a
@@ -1315,6 +1338,17 @@ async def _evaluate_production(update: Update, context: ContextTypes.DEFAULT_TYP
 
     feedback = "\n".join(lines[1:]) if len(lines) > 1 else ""
     correct = result_line.startswith("CORRECT")
+
+    # The grader cannot reliably tell a missing word of the idiom from a missing
+    # article, so a deterministic check backs it up. It only ever adds the
+    # canonical form to the feedback — it never overturns a pass. Overturning
+    # one would risk the very failure this is meant to prevent: being marked
+    # wrong for an answer that used the idiom correctly.
+    if correct and not idiom_present(user_sentence, phrase):
+        feedback += (
+            f'\n\nThe usual form is "{phrase}" '
+            "— worth comparing with what you wrote."
+        )
     # Only advance SM-2 state on the FIRST turn; follow-up drills should not
     # push the SRS interval further (extra reps beyond the first are bonus practice).
     is_first_turn = turn_number <= 1
