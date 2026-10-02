@@ -808,16 +808,21 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reveal the answer to a question the user cannot answer.
+    """Give up on a question.
 
-    Graded as a miss, exactly like a wrong choice: guessing at random to move on
-    would otherwise feed SM-2 correct answers the user never actually knew.
+    On a production question the first press offers the phrase's shape and keeps
+    the question open, because being stuck is the moment the cue is worth
+    something — a hint a day later is a different question. Pressing again, or
+    on any other question type, reveals the answer.
+
+    The reveal is graded as a miss, exactly like a wrong choice: guessing at
+    random to move on would otherwise feed SM-2 answers the user never knew.
     """
     if await _deny_if_blocked(update):
         return
     query = update.callback_query
     parts = query.data.split(":")
-    if len(parts) != 2 or parts[0] != "dunno":
+    if len(parts) != 2 or parts[0] not in ("dunno", "reveal"):
         await query.answer()
         return
     await query.answer()
@@ -825,6 +830,27 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     idiom_id = int(parts[1])
     chat_id = query.message.chat_id
     message_id = query.message.message_id
+
+    # Stage one: a production question still open gets the shape, not the answer.
+    if parts[0] == "dunno":
+        with db.connect(config.DB_PATH) as conn:
+            pending = db.get_production_pending(conn, chat_id, message_id)
+            idiom = db.get_idiom(conn, idiom_id) if pending else None
+        if pending and idiom:
+            from .quiz import phrase_skeleton
+            await _set_markup(query, InlineKeyboardMarkup([[
+                InlineKeyboardButton("💡 Show the answer",
+                                     callback_data=f"reveal:{idiom_id}"),
+                _skip_button(idiom_id),
+            ]]))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(f"Shape: {phrase_skeleton(idiom['phrase'])}\n\n"
+                      "Each · is one letter. Reply with your sentence if it comes "
+                      "to you — this still counts."),
+                reply_to_message_id=message_id,
+            )
+            return
 
     with db.connect(config.DB_PATH) as conn:
         # Same claim as handle_answer: giving up counts as one attempt, and a
@@ -1667,7 +1693,7 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler("allow", cmd_allow))
     application.add_handler(CommandHandler("block", cmd_block))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
-    application.add_handler(CallbackQueryHandler(handle_dunno, pattern=r"^dunno:"))
+    application.add_handler(CallbackQueryHandler(handle_dunno, pattern=r"^(?:dunno|reveal):"))
     application.add_handler(CallbackQueryHandler(handle_skip, pattern=r"^skip:"))
     application.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_user_reply))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.REPLY & ~filters.COMMAND, handle_direct_message))

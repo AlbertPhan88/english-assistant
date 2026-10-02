@@ -610,7 +610,7 @@ def boot_camp_idioms(conn, n: int, user_id: int,
     seed_excludes = list(exclude_ids or [])
     cols = (
         "i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen, "
-        "r.correct, r.wrong, r.boot_phase, r.next_kind"
+        "r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint"
     )
 
     def _pick(phase: int, limit: int, exclude_ids: list[int]) -> list[sqlite3.Row]:
@@ -1038,7 +1038,7 @@ def get_review_row(conn, idiom_id: int, user_id: int) -> sqlite3.Row | None:
     """
     return conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                  r.correct, r.wrong, r.boot_phase, r.next_kind
+                  r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE i.id = ? AND r.user_id = ?""",
         (idiom_id, user_id),
@@ -1237,7 +1237,7 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[s
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                       r.correct, r.wrong, r.boot_phase, r.next_kind
+                       r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                 WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
@@ -1247,7 +1247,7 @@ def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[s
         ))
     return list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                  r.correct, r.wrong, r.boot_phase, r.next_kind
+                  r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE r.user_id = ? AND r.wrong > 0 AND r.last_seen <= ? AND r.skipped = 0
            ORDER BY r.last_seen DESC
@@ -1262,7 +1262,7 @@ def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int], user
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                       r.correct, r.wrong, r.boot_phase, r.next_kind
+                       r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                 WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
@@ -1272,7 +1272,7 @@ def new_idioms_from_theme(conn, theme: str, n: int, exclude_ids: list[int], user
         ))
     return list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                  r.correct, r.wrong, r.boot_phase, r.next_kind
+                  r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE r.user_id = ? AND r.boot_phase = 0 AND i.theme = ? AND r.skipped = 0
            ORDER BY i.id ASC
@@ -1290,7 +1290,7 @@ def never_in_story_idioms(conn, n: int, exclude_ids: list[int], user_id: int) ->
     ex_placeholders = ",".join("?" * len(excluded)) if excluded else "NULL"
     return list(conn.execute(
         f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                   r.correct, r.wrong, r.boot_phase, r.next_kind
+                   r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
             FROM idioms i JOIN reviews r ON i.id = r.idiom_id
             WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
             AND i.id NOT IN ({ex_placeholders})
@@ -1315,7 +1315,7 @@ def story_introduced_idioms(conn, n: int, exclude_ids: list[int], user_id: int) 
         ex_placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                       r.correct, r.wrong, r.boot_phase, r.next_kind
+                       r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                 WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
                 AND i.id IN ({story_placeholders})
@@ -1326,7 +1326,7 @@ def story_introduced_idioms(conn, n: int, exclude_ids: list[int], user_id: int) 
         ))
     return list(conn.execute(
         f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                   r.correct, r.wrong, r.boot_phase, r.next_kind
+                   r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
             FROM idioms i JOIN reviews r ON i.id = r.idiom_id
             WHERE r.user_id = ? AND r.boot_phase = 0 AND r.skipped = 0
             AND i.id IN ({story_placeholders})
@@ -1398,7 +1398,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
         placeholders = ",".join("?" * len(exclude_ids))
         review = list(conn.execute(
             f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                       r.correct, r.wrong, r.boot_phase, r.next_kind
+                       r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                 FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                 WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ? AND r.skipped = 0
                 AND i.id NOT IN ({placeholders})
@@ -1409,7 +1409,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
     else:
         review = list(conn.execute(
             """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                      r.correct, r.wrong, r.boot_phase, r.next_kind
+                      r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                WHERE r.user_id = ? AND r.boot_phase >= 3 AND r.due_date <= ? AND r.skipped = 0
                ORDER BY r.due_date ASC, r.ease ASC
@@ -1435,7 +1435,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
             placeholders = ",".join("?" * len(all_ids))
             extra = list(conn.execute(
                 f"""SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                           r.correct, r.wrong, r.boot_phase, r.next_kind
+                           r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                     FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                     WHERE r.user_id = ? AND r.skipped = 0 AND r.boot_phase > 0
                     AND i.id NOT IN ({placeholders})
@@ -1446,7 +1446,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
         else:
             extra = list(conn.execute(
                 """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                          r.correct, r.wrong, r.boot_phase, r.next_kind
+                          r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
                    FROM idioms i JOIN reviews r ON i.id = r.idiom_id
                    WHERE r.user_id = ? AND r.skipped = 0 AND r.boot_phase > 0
                    ORDER BY r.due_date ASC, r.ease ASC, RANDOM()
@@ -1467,7 +1467,7 @@ def weak_idioms_this_week(conn, n: int, user_id: int) -> list[sqlite3.Row]:
     cutoff = (config.today_local() - timedelta(days=7)).isoformat()
     return list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
-                  r.correct, r.wrong, r.boot_phase, r.next_kind
+                  r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint
            FROM idioms i JOIN reviews r ON i.id = r.idiom_id
            WHERE r.user_id = ? AND r.last_seen >= ? AND r.skipped = 0
            ORDER BY CAST(r.wrong AS REAL) / (r.correct + r.wrong + 1) DESC

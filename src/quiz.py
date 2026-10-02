@@ -570,11 +570,21 @@ def production_ready(row) -> bool:
 
     Free recall across the whole collection is far harder than picking from four
     options, so asking it of an idiom the learner keeps missing produces a near
-    certain failure — which costs an ease penalty and teaches nothing. Boot
-    phase 2 is exempt: that stage is where production is introduced.
+    certain failure — which costs an ease penalty and teaches nothing.
+
+    Two exemptions. Boot phase 2 is the stage where production is introduced, so
+    gating it would break the pipeline. And an idiom with a cue waiting has
+    already missed a production question: holding it back would rotate the cue
+    away unseen, and the cue is the mechanism meant to rescue exactly the weak
+    idioms this gate otherwise blocks.
     """
     if (row["boot_phase"] if row["boot_phase"] is not None else -1) == 2:
         return True
+    try:
+        if row["prod_hint"]:
+            return True
+    except (IndexError, KeyError):
+        pass  # row built by a query that doesn't select it
     ok = row["correct"] or 0
     wrong = row["wrong"] or 0
     if ok + wrong == 0:
