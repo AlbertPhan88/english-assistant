@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
+from . import config
+
 
 THEME_ORDER = [
     "communication", "relationships", "emotions", "work", "success", "money", "time",
@@ -33,7 +35,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     ease             REAL NOT NULL DEFAULT 2.5,
     interval         INTEGER NOT NULL DEFAULT 0,
     repetitions      INTEGER NOT NULL DEFAULT 0,
-    due_date         TEXT NOT NULL DEFAULT (date('now')),
+    due_date         TEXT NOT NULL,
     last_seen        TEXT,
     correct          INTEGER NOT NULL DEFAULT 0,
     wrong            INTEGER NOT NULL DEFAULT 0,
@@ -124,7 +126,7 @@ def _migrate_reviews_to_multiuser(conn, old_cols: set) -> None:
         ease             REAL NOT NULL DEFAULT 2.5,
         interval         INTEGER NOT NULL DEFAULT 0,
         repetitions      INTEGER NOT NULL DEFAULT 0,
-        due_date         TEXT NOT NULL DEFAULT (date('now')),
+        due_date         TEXT NOT NULL,
         last_seen        TEXT,
         correct          INTEGER NOT NULL DEFAULT 0,
         wrong            INTEGER NOT NULL DEFAULT 0,
@@ -226,8 +228,9 @@ def _migrate(conn) -> None:
 
     # Backfill review rows for any registered user missing them
     conn.execute(
-        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase) "
-        "SELECT u.chat_id, i.id, 0 FROM users u CROSS JOIN idioms i"
+        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase, due_date) "
+        "SELECT u.chat_id, i.id, 0, ? FROM users u CROSS JOIN idioms i",
+        (config.today_local().isoformat(),),
     )
 
     rev_cols2 = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
@@ -403,9 +406,9 @@ def add_idiom(conn, phrase: str, meaning: str, example: str | None, source_pdf: 
     idiom_id = cur.lastrowid
     # Create a review row for every registered user
     conn.execute(
-        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase) "
-        "SELECT chat_id, ?, 0 FROM users",
-        (idiom_id,),
+        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase, due_date) "
+        "SELECT chat_id, ?, 0, ? FROM users",
+        (idiom_id, config.today_local().isoformat()),
     )
     return idiom_id
 
@@ -443,14 +446,15 @@ def register_user(conn, chat_id: int, username: str | None,
     never changed by a repeat /start.
     """
     conn.execute(
-        "INSERT OR IGNORE INTO users(chat_id, username, blocked) VALUES (?, ?, ?)",
-        (chat_id, username, 1 if blocked else 0),
+        "INSERT OR IGNORE INTO users(chat_id, username, blocked, registered) "
+        "VALUES (?, ?, ?, ?)",
+        (chat_id, username, 1 if blocked else 0, config.now_local().isoformat()),
     )
     # Create review rows for all existing idioms this user doesn't have yet
     conn.execute(
-        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase) "
-        "SELECT ?, id, 0 FROM idioms",
-        (chat_id,),
+        "INSERT OR IGNORE INTO reviews(user_id, idiom_id, boot_phase, due_date) "
+        "SELECT ?, id, 0, ? FROM idioms",
+        (chat_id, config.today_local().isoformat()),
     )
 
 
@@ -644,8 +648,8 @@ def boot_camp_idioms(conn, n: int, user_id: int,
 
 def add_reask(conn, chat_id: int, idiom_id: int) -> None:
     conn.execute(
-        "INSERT INTO reask_queue(chat_id, idiom_id) VALUES (?, ?)",
-        (chat_id, idiom_id),
+        "INSERT INTO reask_queue(chat_id, idiom_id, added_at) VALUES (?, ?, ?)",
+        (chat_id, idiom_id, config.now_local().isoformat()),
     )
 
 
@@ -808,9 +812,11 @@ def save_production_pending(conn, chat_id: int, message_id: int, idiom_id: int, 
                             turn_number: int = 1, used_situations: str = "") -> None:
     conn.execute(
         """INSERT OR REPLACE INTO production_cache(
-             chat_id, message_id, idiom_id, phrase, turn_number, used_situations
-           ) VALUES (?, ?, ?, ?, ?, ?)""",
-        (chat_id, message_id, idiom_id, phrase, turn_number, used_situations),
+             chat_id, message_id, idiom_id, phrase, turn_number, used_situations,
+             created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (chat_id, message_id, idiom_id, phrase, turn_number, used_situations,
+         config.now_local().isoformat()),
     )
 
 
@@ -958,9 +964,7 @@ def mark_question_answered(conn, chat_id: int, message_id: int) -> None:
 
 def prune_question_msg(conn, keep_days: int = 30) -> None:
     """Drop message anchors older than `keep_days`; replies never arrive that late."""
-    from datetime import timedelta
-    from . import config
-    cutoff = (config.today_local() - timedelta(days=keep_days)).isoformat()
+    cutoff = config.local_date_str(keep_days)
     conn.execute("DELETE FROM question_msg WHERE sent_at < ?", (cutoff,))
 
 
@@ -1230,9 +1234,7 @@ def all_prefs(conn, user_id: int, defaults: dict[str, int]) -> dict[str, int]:
 
 def warm_up_idioms(conn, n: int, exclude_ids: list[int], user_id: int) -> list[sqlite3.Row]:
     """Idioms with wrong > 0 AND last_seen >= 7 days ago for a specific user."""
-    from datetime import timedelta
-    from . import config
-    cutoff = (config.today_local() - timedelta(days=7)).isoformat()
+    cutoff = config.local_date_str(7)
     if exclude_ids:
         placeholders = ",".join("?" * len(exclude_ids))
         return list(conn.execute(
@@ -1462,9 +1464,7 @@ def build_daily_rows(conn, today: date, total: int = 15, user_id: int = 0,
 
 def weak_idioms_this_week(conn, n: int, user_id: int) -> list[sqlite3.Row]:
     """Idioms reviewed in the past 7 days, ordered by error rate, for a specific user."""
-    from datetime import timedelta
-    from . import config
-    cutoff = (config.today_local() - timedelta(days=7)).isoformat()
+    cutoff = config.local_date_str(7)
     return list(conn.execute(
         """SELECT i.*, r.ease, r.interval, r.repetitions, r.due_date, r.last_seen,
                   r.correct, r.wrong, r.boot_phase, r.next_kind, r.prod_hint

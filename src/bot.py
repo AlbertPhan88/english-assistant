@@ -378,7 +378,8 @@ def _prefs(conn, chat_id: int) -> dict:
     })
 
 
-def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
+def _build_reask_questions(conn, chat_id: int, cap: int,
+                           max_production: int | None = None) -> list[Question]:
     """Pop up to `cap` missed idioms and rebuild each as the question type it is
     now due for.
 
@@ -386,16 +387,25 @@ def _build_reask_questions(conn, chat_id: int, cap: int) -> list[Question]:
     through build_one re-tests the skill that actually failed. Rebuilding every
     re-ask as a forward multiple-choice, as this used to, let a failed
     production question come back as a four-option pick.
+
+    `max_production` counts against the same session ceiling the rest of the set
+    uses. Without it a 30-question morning built ten re-asks with production
+    unrestricted, so the ceiling of six was already exceeded before the pipeline
+    was consulted — and the pipeline then correctly added none, which hid it.
     """
     questions: list[Question] = []
+    produced = 0
     for r in db.pop_reasks(conn, chat_id, cap):
         row = db.get_review_row(conn, r["idiom_id"], chat_id)
         if row is None:
             continue
+        allow = max_production is None or produced < max_production
         try:
-            q = build_one(conn, row, chat_id)
+            q = build_one(conn, row, chat_id, allow_production=allow)
         except ValueError:
             continue
+        if q.kind == "production":
+            produced += 1
         q.reask = True
         questions.append(q)
     return questions
@@ -1005,15 +1015,17 @@ async def send_daily_quiz(application: Application) -> None:
                 # rather than adding to it, so the session length is unchanged.
                 prefs = _prefs(conn, chat_id)
                 total = prefs["daily_count"]
-                reasks = _build_reask_questions(conn, chat_id, max(1, total // 3))
+                prod_ceiling = prefs["production_per_session"]
+                reasks = _build_reask_questions(
+                    conn, chat_id, max(1, total // 3), max_production=prod_ceiling
+                )
                 remaining = total - len(reasks)
                 rows = db.build_daily_rows(
                     conn, today, remaining + 10, chat_id,
                     extra_exclude_ids=recent_sent + [q.idiom_id for q in reasks],
                 )
                 prod_left = max(
-                    0, prefs["production_per_session"]
-                    - sum(1 for q in reasks if q.kind == "production")
+                    0, prod_ceiling - sum(1 for q in reasks if q.kind == "production")
                 )
                 questions = reasks + build_questions_from_rows(
                     conn, rows, chat_id, max_production=prod_left
@@ -1118,15 +1130,17 @@ async def send_evening_quiz(application: Application) -> None:
                 sent_today = db.get_sent_today(conn, chat_id, today_str)
                 prefs = _prefs(conn, chat_id)
                 total = prefs["evening_count"]
-                reasks = _build_reask_questions(conn, chat_id, max(1, total // 3))
+                prod_ceiling = prefs["production_per_session"]
+                reasks = _build_reask_questions(
+                    conn, chat_id, max(1, total // 3), max_production=prod_ceiling
+                )
                 remaining = total - len(reasks)
                 rows = db.build_daily_rows(
                     conn, today, remaining + 10, chat_id,
                     extra_exclude_ids=sent_today + [q.idiom_id for q in reasks],
                 )
                 prod_left = max(
-                    0, prefs["production_per_session"]
-                    - sum(1 for q in reasks if q.kind == "production")
+                    0, prod_ceiling - sum(1 for q in reasks if q.kind == "production")
                 )
                 questions = reasks + build_questions_from_rows(
                     conn, rows, chat_id, max_production=prod_left

@@ -72,6 +72,29 @@ def today_local() -> date:
     return datetime.now(TZ).date()
 
 
+def local_date_str(days_ago: int = 0) -> str:
+    """A local calendar date as YYYY-MM-DD, optionally shifted back.
+
+    Every date boundary in the app has to come from here. SQLite's date('now')
+    and CURRENT_TIMESTAMP are UTC, which is the previous calendar day for the
+    first seven hours of every local day in Asia/Ho_Chi_Minh — so a query that
+    lets SQLite decide the date silently files a 06:00 morning session under
+    yesterday.
+    """
+    from datetime import timedelta
+    return (today_local() - timedelta(days=days_ago)).isoformat()
+
+
+def local_date_of(stamp: str | None) -> str:
+    """The local calendar date of a stored timestamp, as YYYY-MM-DD.
+
+    Timestamps are written with config.now_local(), so the date is already the
+    local one and a prefix is enough. Passing the value through SQLite's date()
+    instead would convert the stored offset to UTC and shift the day.
+    """
+    return (stamp or "")[:10]
+
+
 def reply_budget(visible_tokens: int) -> int:
     """max_tokens for a call whose visible answer has a roughly fixed length."""
     return visible_tokens + THINKING_HEADROOM
