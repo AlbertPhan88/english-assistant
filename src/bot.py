@@ -832,14 +832,17 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     query = update.callback_query
     parts = query.data.split(":")
-    if len(parts) != 2 or parts[0] not in ("dunno", "reveal"):
+    if parts[0] not in ("dunno", "reveal") or len(parts) < 2:
         await query.answer()
         return
     await query.answer()
 
     idiom_id = int(parts[1])
     chat_id = query.message.chat_id
-    message_id = query.message.message_id
+    # "reveal" is pressed on the hint message, not the question, so it carries
+    # the question's id: every lookup below — the pending answer, the claim, the
+    # cached stem — is keyed by the message the question was asked in.
+    message_id = int(parts[2]) if len(parts) > 2 else query.message.message_id
 
     # Stage one: a production question still open gets the shape, not the answer.
     if parts[0] == "dunno":
@@ -848,17 +851,22 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             idiom = db.get_idiom(conn, idiom_id) if pending else None
         if pending and idiom:
             from .quiz import phrase_skeleton
-            await _set_markup(query, InlineKeyboardMarkup([[
-                InlineKeyboardButton("💡 Show the answer",
-                                     callback_data=f"reveal:{idiom_id}"),
-                _skip_button(idiom_id),
-            ]]))
+            # Leave the question itself with nothing but skip. The next step
+            # belongs on the hint, which is where the user is now reading.
+            await _set_markup(query, _skip_only_keyboard(idiom_id))
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(f"Shape: {phrase_skeleton(idiom['phrase'])}\n\n"
-                      "Each · is one letter. Reply with your sentence if it comes "
-                      "to you — this still counts."),
+                      "Each · is one letter. Reply to the question above with "
+                      "your sentence if it comes to you — this still counts."),
                 reply_to_message_id=message_id,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "💡 Show the answer",
+                        callback_data=f"reveal:{idiom_id}:{message_id}",
+                    ),
+                    _skip_button(idiom_id),
+                ]]),
             )
             return
 
@@ -892,6 +900,8 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{idiom['meaning']}{viet_line}{_register_line(idiom)}{context_line}"
     )
 
+    # query.message is the hint when revealing from it, so its buttons are the
+    # ones to retire; the answer still threads under the original question.
     await _set_markup(query, _skip_only_keyboard(idiom_id))
     await context.bot.send_message(
         chat_id=chat_id,
@@ -1707,7 +1717,9 @@ def run(db_path: str) -> None:
     application.add_handler(CommandHandler("allow", cmd_allow))
     application.add_handler(CommandHandler("block", cmd_block))
     application.add_handler(CallbackQueryHandler(handle_answer, pattern=r"^ans:"))
-    application.add_handler(CallbackQueryHandler(handle_dunno, pattern=r"^(?:dunno|reveal):"))
+    application.add_handler(
+        CallbackQueryHandler(handle_dunno, pattern=r"^(?:dunno|reveal):")
+    )
     application.add_handler(CallbackQueryHandler(handle_skip, pattern=r"^skip:"))
     application.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_user_reply))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.REPLY & ~filters.COMMAND, handle_direct_message))
