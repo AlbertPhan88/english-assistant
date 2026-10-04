@@ -766,10 +766,9 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if await _deny_if_blocked(update):
         return
     query = update.callback_query
-    await query.answer()
-
     parts = query.data.split(":")
     if len(parts) != 4 or parts[0] != "ans":
+        await query.answer()
         await _set_markup(query, None)
         return
 
@@ -781,12 +780,26 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     with db.connect(config.DB_PATH) as conn:
         # Claim first: a second tap must not grade the same question twice.
         if not db.claim_question(conn, chat_id, query.message.message_id, idiom_id):
+            # Say so rather than returning silently. A tap that produces nothing
+            # reads as a broken button, which is how the dead-button bug on
+            # unanchored questions went unreported for over a week.
+            await query.answer("Already answered.", show_alert=False)
             return
         idiom = db.get_idiom(conn, idiom_id)
         quality = 5 if chosen == correct_index else 2
         db.apply_review(conn, idiom_id, quality, chat_id)
         if chosen != correct_index:
             db.add_reask(conn, chat_id, idiom_id)
+    await query.answer()
+
+    if idiom is None:
+        logger.warning("Answer: idiom %s no longer exists", idiom_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="That idiom is no longer in the database, so I can't show the answer.",
+            reply_to_message_id=query.message.message_id,
+        )
+        return
 
     phrase = idiom["phrase"]
     meaning = idiom["meaning"]
@@ -835,7 +848,6 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if parts[0] not in ("dunno", "reveal") or len(parts) < 2:
         await query.answer()
         return
-    await query.answer()
 
     idiom_id = int(parts[1])
     chat_id = query.message.chat_id
@@ -850,6 +862,7 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             pending = db.get_production_pending(conn, chat_id, message_id)
             idiom = db.get_idiom(conn, idiom_id) if pending else None
         if pending and idiom:
+            await query.answer()
             from .quiz import phrase_skeleton
             # Leave the question itself with nothing but skip. The next step
             # belongs on the hint, which is where the user is now reading.
@@ -874,6 +887,7 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Same claim as handle_answer: giving up counts as one attempt, and a
         # question already answered must not be re-graded as a miss.
         if not db.claim_question(conn, chat_id, message_id, idiom_id):
+            await query.answer("Already answered.", show_alert=False)
             return
         idiom = db.get_idiom(conn, idiom_id)
         pending = db.get_production_pending(conn, chat_id, message_id)
@@ -890,7 +904,11 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         db.clear_production_pending_upto(conn, chat_id, idiom_id, message_id)
 
     if idiom is None:
+        logger.warning("Reveal: idiom %s no longer exists", idiom_id)
+        await query.answer("That idiom is no longer in the database.",
+                           show_alert=True)
         return
+    await query.answer()
 
     viet = idiom["vietnamese_equiv"] or ""
     viet_line = f"\n🇻🇳 {viet}" if viet and viet != "—" else ""
