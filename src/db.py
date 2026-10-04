@@ -932,18 +932,34 @@ def get_question_msg(conn, chat_id: int, message_id: int) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def claim_question(conn, chat_id: int, message_id: int) -> bool:
+def claim_question(conn, chat_id: int, message_id: int,
+                   idiom_id: int = 0) -> bool:
     """Claim a question as answered. True for the first caller only.
 
     Telegram delivers a callback per tap, so a double tap on an answer button
     arrives as two updates. Grading both would apply the SM-2 transition twice.
     The UPDATE is the lock: SQLite serializes it, so exactly one caller sees a
     row change.
+
+    A message with no row has never been answered, so the claim succeeds and
+    records one. Treating a missing row as "already answered" silently discarded
+    every tap on a question sent before this table existed — leaving "I know
+    this", the one control that does not claim, as the only button that worked.
     """
     cur = conn.execute(
         "UPDATE question_msg SET answered = 1 "
         "WHERE chat_id = ? AND message_id = ? AND answered = 0",
         (chat_id, message_id),
+    )
+    if cur.rowcount > 0:
+        return True
+    # No row updated: either it is already claimed, or it was never recorded.
+    # INSERT OR IGNORE distinguishes the two without a race.
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO question_msg(
+             chat_id, message_id, idiom_id, kind, sent_at, answered
+           ) VALUES (?, ?, ?, '', ?, 1)""",
+        (chat_id, message_id, idiom_id, config.now_local().isoformat()),
     )
     return cur.rowcount > 0
 

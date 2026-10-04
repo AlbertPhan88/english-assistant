@@ -780,7 +780,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = query.message.chat_id
     with db.connect(config.DB_PATH) as conn:
         # Claim first: a second tap must not grade the same question twice.
-        if not db.claim_question(conn, chat_id, query.message.message_id):
+        if not db.claim_question(conn, chat_id, query.message.message_id, idiom_id):
             return
         idiom = db.get_idiom(conn, idiom_id)
         quality = 5 if chosen == correct_index else 2
@@ -873,7 +873,7 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     with db.connect(config.DB_PATH) as conn:
         # Same claim as handle_answer: giving up counts as one attempt, and a
         # question already answered must not be re-graded as a miss.
-        if not db.claim_question(conn, chat_id, message_id):
+        if not db.claim_question(conn, chat_id, message_id, idiom_id):
             return
         idiom = db.get_idiom(conn, idiom_id)
         pending = db.get_production_pending(conn, chat_id, message_id)
