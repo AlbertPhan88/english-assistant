@@ -863,19 +863,40 @@ def recent_production_answers(conn, chat_id: int, n: int = 10,
     ))
 
 
+def production_message_ids(conn, chat_id: int, idiom_id: int,
+                           turn_number: int) -> list[int]:
+    """Every message still waiting on an answer for this idiom, up to this turn.
+
+    One turn can be asked across two messages — the question and the hint that
+    follows it — so settling a turn means settling both.
+    """
+    return [
+        r[0] for r in conn.execute(
+            "SELECT message_id FROM production_cache "
+            "WHERE chat_id = ? AND idiom_id = ? AND turn_number <= ?",
+            (chat_id, idiom_id, turn_number),
+        )
+    ]
+
+
 def clear_production_pending_upto(conn, chat_id: int, idiom_id: int,
-                                  message_id: int) -> None:
-    """Clear the answered pending row and every older one for the same idiom.
+                                  turn_number: int) -> None:
+    """Clear this turn's pending rows for the idiom, and every earlier turn's.
 
     An idiom sent on several days and left unanswered each time leaves a row per
     send, so clearing only the replied-to message would keep the idiom in the
-    backlog forever. Rows newer than the reply are kept: by this point a
-    multi-turn follow-up may already have queued one.
+    backlog forever.
+
+    Keyed by turn rather than by message id. A turn can own two messages — the
+    question and its hint — and the hint's id is the higher of the two, so a
+    message-id cutoff left the hint's row behind whenever the learner answered
+    the question itself. Later turns still survive, since a multi-turn follow-up
+    may already have queued one.
     """
     conn.execute(
         "DELETE FROM production_cache "
-        "WHERE chat_id = ? AND idiom_id = ? AND message_id <= ?",
-        (chat_id, idiom_id, message_id),
+        "WHERE chat_id = ? AND idiom_id = ? AND turn_number <= ?",
+        (chat_id, idiom_id, turn_number),
     )
 
 

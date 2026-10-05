@@ -867,11 +867,11 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Leave the question itself with nothing but skip. The next step
             # belongs on the hint, which is where the user is now reading.
             await _set_markup(query, _skip_only_keyboard(idiom_id))
-            await context.bot.send_message(
+            hint = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(f"Shape: {phrase_skeleton(idiom['phrase'])}\n\n"
-                      "Each · is one letter. Reply to the question above with "
-                      "your sentence if it comes to you — this still counts."),
+                      "Each · is one letter. Reply here with your sentence if "
+                      "it comes to you — this still counts."),
                 reply_to_message_id=message_id,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton(
@@ -881,6 +881,19 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     _skip_button(idiom_id),
                 ]]),
             )
+            # Make the hint answerable too. It is the message the learner is
+            # now reading, so a reply lands there — and keying the pending
+            # answer only to the question meant such a reply was not graded at
+            # all until they scrolled back and replied to the question instead.
+            with db.connect(config.DB_PATH) as conn:
+                db.save_production_pending(
+                    conn, chat_id, hint.message_id, idiom_id, idiom["phrase"],
+                    turn_number=pending["turn_number"],
+                    used_situations=pending["used_situations"],
+                )
+                db.log_question_msg(
+                    conn, chat_id, hint.message_id, idiom_id, "production"
+                )
             return
 
     with db.connect(config.DB_PATH) as conn:
@@ -901,7 +914,10 @@ async def handle_dunno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 db.set_production_hint(conn, idiom_id, chat_id, True)
         # The question is closed now, so stop waiting for a typed sentence —
         # including any older unanswered copy of the same idiom.
-        db.clear_production_pending_upto(conn, chat_id, idiom_id, message_id)
+        turn = pending["turn_number"] if pending is not None else 1
+        for mid in db.production_message_ids(conn, chat_id, idiom_id, turn):
+            db.mark_question_answered(conn, chat_id, mid)
+        db.clear_production_pending_upto(conn, chat_id, idiom_id, turn)
 
     if idiom is None:
         logger.warning("Reveal: idiom %s no longer exists", idiom_id)
@@ -1601,13 +1617,19 @@ async def handle_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ok = await _evaluate_production(update, context, prod, msg.text or "")
         if ok:
             with db.connect(config.DB_PATH) as conn:
-                db.clear_production_pending_upto(
-                    conn, chat_id, pending["idiom_id"], replied_id
-                )
-                # Settle the message so "Don't know" on it can't re-grade as a
-                # miss. Not claimed before grading: a transient grader failure
-                # invites the user to reply again.
+                # Settle every message of this turn — the question and its hint
+                # — so "Don't know" on either cannot re-grade it as a miss.
+                # Collected before the clear, which removes the rows. Not
+                # claimed before grading: a transient grader failure invites the
+                # user to reply again.
+                for mid in db.production_message_ids(
+                    conn, chat_id, prod["idiom_id"], prod["turn_number"]
+                ):
+                    db.mark_question_answered(conn, chat_id, mid)
                 db.mark_question_answered(conn, chat_id, replied_id)
+                db.clear_production_pending_upto(
+                    conn, chat_id, prod["idiom_id"], prod["turn_number"]
+                )
         return
 
     user_question = msg.text or ""
